@@ -1,0 +1,1285 @@
+<!-- IPTV Pro Inspector — v5.9.2-patched (Final) -->
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IPTV Pro Inspector</title>
+<style>
+:root {
+  --bg-base:           #111114;
+  --bg-surface:        #1c1c20;
+  --bg-surface-2:      #242428;
+  --bg-hover:          #2a2a2f;
+  --border:            #2e2e35;
+  --border-focus:      #3b82f6;
+  --blue:              #3b82f6;
+  --blue-dim:          rgba(59,130,246,.12);
+  --blue-border:       rgba(59,130,246,.35);
+  --green:             #10b981;
+  --green-dim:         rgba(16,185,129,.12);
+  --green-border:      rgba(16,185,129,.3);
+  --amber:             #f59e0b;
+  --amber-dim:         rgba(245,158,11,.12);
+  --amber-border:      rgba(245,158,11,.3);
+  --red:               #ef4444;
+  --red-dim:           rgba(239,68,68,.12);
+  --red-border:        rgba(239,68,68,.3);
+  --violet:            #a855f7;
+  --violet-dim:        rgba(168,85,247,.14);
+  --violet-border:     rgba(168,85,247,.32);
+  --cyan:              #22d3ee;
+  --cyan-dim:          rgba(34,211,238,.14);
+  --cyan-border:       rgba(34,211,238,.32);
+  --text-1:            #f1f1f3;
+  --text-2:            #9999aa;
+  --text-3:            #55555f;
+  --mono:              ui-monospace,SFMono-Regular,Menlo,monospace;
+  --radius:            6px;
+  --radius-sm:         4px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg-base);
+  color: var(--text-1);
+  font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  padding: 16px 12px 40px;
+}
+
+.wrap {
+  width: 100%;
+  max-width: 740px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* ── Header ─ */
+.hdr {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.hdr-title {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  color: var(--text-1);
+}
+.hdr-title span { color: var(--blue); }
+.badge-ver {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-3);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  padding: 2px 7px;
+  border-radius: 20px;
+}
+
+/* ── Tabs ── */
+.tabs {
+  display: flex;
+  background: #0d0d10;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 3px;
+  gap: 3px;
+}
+.tab {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-3);
+  padding: 7px 4px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all .15s;
+}
+.tab.on {
+  background: var(--bg-surface-2);
+  color: var(--text-1);
+  border: 1px solid var(--border);
+}
+
+/* ── M3U analysis toggle bar ── */
+.mtoggle-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px;
+}
+
+/* ── Tab panels ── */
+.panel { display: none; flex-direction: column; gap: 10px; }
+.panel.on { display: flex; }
+
+/* ── Form box ── */
+.form-box {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.field { display: flex; flex-direction: column; gap: 5px; }
+label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-2);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+textarea {
+  width: 100%;
+  background: #0d0d10;
+  border: 1px solid var(--border);
+  color: var(--text-1);
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  resize: vertical;
+  min-height: 64px;
+  transition: border-color .15s, box-shadow .15s;
+}
+textarea:focus {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px rgba(59,130,246,.15);
+}
+
+/* ── File upload ── */
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #0d0d10;
+  border: 1px solid var(--border);
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background .15s;
+}
+.file-row:hover { background: var(--bg-hover); }
+.file-name { flex: 1; font-size: 11px; color: var(--text-3); }
+.file-chip {
+  background: var(--bg-surface-2);
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 10px;
+}
+input[type="file"] { display: none; }
+
+/* ── Btn row ── */
+.btn-row { display: flex; gap: 8px; }
+.btn-primary {
+  flex: 1;
+  background: var(--blue);
+  color: #fff;
+  border: none;
+  padding: 9px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background .15s, opacity .15s;
+}
+.btn-primary:hover { background: #2563eb; }
+.btn-stop {
+  background: var(--bg-surface-2);
+  color: var(--red);
+  border: 1px solid var(--red-border);
+  padding: 9px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: none;
+  transition: background .15s;
+}
+.btn-stop:hover { background: var(--red-dim); }
+.btn-stop.show { display: block; }
+
+/* ── Progress ── */
+.progress-box {
+  display: none;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  gap: 8px;
+  flex-direction: column;
+}
+.progress-box.show { display: flex; }
+.prog-top {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-2);
+}
+.prog-track {
+  height: 5px;
+  background: #0d0d10;
+  border-radius: 99px;
+  overflow: hidden;
+}
+.prog-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--blue) 0%, #60a5fa 100%);
+  border-radius: 99px;
+  width: 0%;
+  transition: width .35s ease;
+}
+.prog-stats {
+  display: flex;
+  gap: 14px;
+  font-size: 11px;
+  flex-wrap: wrap;
+}
+.stat-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-2);
+}
+.stat-chip .dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.stat-chip.green { color: var(--green); }
+.stat-chip.red   { color: var(--red);   }
+.stat-chip.blue  { color: var(--blue);  }
+.stat-chip.amber { color: var(--amber); }
+
+/* ── Controls bar ── */
+.controls {
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+}
+.controls.show { display: flex; }
+.cbar {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.cbar-label {
+  font-size: 10px;
+  color: var(--text-3);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  margin-left: 2px;
+}
+.pill {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  padding: 4px 10px;
+  border-radius: 99px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all .15s;
+}
+.pill:hover { background: var(--bg-hover); color: var(--text-1); }
+.pill.on {
+  background: var(--blue-dim);
+  color: var(--blue);
+  border-color: var(--blue-border);
+}
+.pill.green-pill {
+  color: #34d399;
+  border-color: var(--green-border);
+}
+.pill.green-pill:hover { background: var(--green-dim); }
+
+/* ── Summary strip ── */
+.summary {
+  display: none;
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  text-align: center;
+}
+.summary.show { display: block; }
+
+/* ── Cards ── */
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  animation: slideDown .2s ease;
+  transition: border-color .15s;
+}
+.card:hover { border-color: #3a3a44; }
+.card.hidden { display: none; }
+
+/* ── Collapsed header ── */
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 9px;
+  background: #202025;
+  cursor: pointer;
+  user-select: none;
+  min-height: 34px;
+}
+.card-idx {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--text-3);
+  flex-shrink: 0;
+  min-width: 18px;
+}
+.card-info {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.card-title {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: ltr;
+  text-align: right;
+}
+.mini-tags {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.mini-tag {
+  font-size: 9px;
+  color: var(--text-3);
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: var(--mono);
+}
+.mini-tag.exp  { color: var(--amber); border-color: var(--amber-border); }
+.mini-tag.ok   { color: var(--green); border-color: var(--green-border); }
+.mini-tag.dead { color: var(--red);   border-color: var(--red-border);   }
+
+.card-right {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.badge {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 9.5px;
+  font-weight: 700;
+  font-family: var(--mono);
+  white-space: nowrap;
+  letter-spacing: .3px;
+}
+.badge-ok    { background: var(--green-dim); color: #34d399; border: 1px solid var(--green-border); }
+.badge-trial { background: var(--amber-dim); color: #fbbf24; border: 1px solid var(--amber-border); }
+.badge-fail  { background: var(--red);   color: #f87171; border: 1px solid var(--red-border);   }
+.badge-cancelled { background: var(--bg-surface-2); color: var(--text-3); border: 1px solid var(--border); }
+
+/* ── Chevron ── */
+.arrow {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--blue);
+  transition: transform .2s, color .15s;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  background: var(--blue-dim);
+}
+.card:hover .arrow { color: #60a5fa; }
+.card.open .arrow { transform: rotate(180deg); }
+
+.card-body {
+  display: none;
+  padding: 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-base);
+  font-size: 11.5px;
+}
+.card.open .card-body { display: block; }
+
+/* ── Card body rows ── */
+.row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+  gap: 8px;
+}
+.row:last-child { border-bottom: none; }
+.row-label { color: var(--text-2); flex-shrink: 0; display: flex; align-items: center; gap: 6px; }
+.row-val   { font-weight: 500; text-align: left; direction: ltr; }
+
+/* ── Counter rows ── */
+.row-icon-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.row-icon-chip.icon-ch     { background: var(--blue-dim);   border: 1px solid var(--blue-border);   }
+.row-icon-chip.icon-vod    { background: var(--violet-dim); border: 1px solid var(--violet-border); }
+.row-icon-chip.icon-series { background: var(--cyan-dim);   border: 1px solid var(--cyan-border);   }
+.counter-val-ch     { color: var(--blue);   font-weight: 700; font-family: var(--mono); }
+.counter-val-vod    { color: var(--violet); font-weight: 700; font-family: var(--mono); }
+.counter-val-series { color: var(--cyan);   font-weight: 700; font-family: var(--mono); }
+
+.cred-box {
+  background: #0d0d10;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cred-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+}
+.cred-val {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--blue);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: ltr;
+  max-width: 300px;
+}
+
+/* ── Buttons ── */
+.btn-copy {
+  background: var(--bg-surface-2);
+  color: var(--blue);
+  border: 1px solid var(--border);
+  padding: 2px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 10px;
+  font-family: var(--mono);
+  white-space: nowrap;
+  transition: background .15s, color .15s;
+  flex-shrink: 0;
+}
+.btn-copy:hover { background: var(--blue-dim); }
+
+/* ── Mobile ── */
+@media (max-width: 480px) {
+  body { padding: 10px 8px 32px; }
+  .hdr-title { font-size: 12px; }
+  .tab { font-size: 11px; padding: 6px 2px; }
+  .cred-val { max-width: 160px; }
+  .prog-stats { gap: 8px; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- Header -->
+  <div class="hdr">
+    <div class="hdr-title">IPTV <span>PRO</span> INSPECTOR</div>
+    <div class="badge-ver">v5.9.2-patched</div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab on"  onclick="switchTab('xtream',this)">Xtream Combo</button>
+    <button class="tab"     onclick="switchTab('m3u',   this)">M3U Playlists</button>
+    <button class="tab"     onclick="switchTab('mac',   this)">MAC / Stalker</button>
+  </div>
+
+  <!-- M3U analysis toggle -->
+  <div class="mtoggle-bar">
+    <span class="cbar-label">تحليل M3U:</span>
+    <button class="pill" id="m3uToggleBtn" onclick="toggleM3uAnalysis()">📋 معطل</button>
+  </div>
+
+  <!-- ── Xtream panel ── -->
+  <div class="panel on" id="panel-xtream">
+    <div class="form-box">
+      <div class="field">
+        <label>رفع ملف كومبو (.txt)</label>
+        <label class="file-row">
+          <span class="file-name" id="fname">اختر ملف الحسابات...</span>
+          <span class="file-chip">استعراض</span>
+          <input type="file" accept=".txt" onchange="loadFile(event)">
+        </label>
+      </div>
+      <div class="field">
+        <label>حسابات يدوية (user:pass)</label>
+        <textarea id="creds" placeholder="user1:pass1&#10;user2:pass2" rows="2"></textarea>
+      </div>
+      <div class="field">
+        <label>الهوستات (سطر لكل هوست)</label>
+        <textarea id="servers" placeholder="server.com:8080&#10;server2.com" rows="2"></textarea>
+      </div>
+      <div class="btn-row">
+        <button class="btn-primary" onclick="startScan('xtream')">▶ بدء الفحص</button>
+        <button class="btn-stop" id="stop-xtream" onclick="stopScan()">■ إيقاف</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── M3U panel ── -->
+  <div class="panel" id="panel-m3u">
+    <div class="form-box">
+      <div class="field">
+        <label>روابط M3U (كل رابط في سطر)</label>
+        <textarea id="m3uInput" placeholder="http://server.com:8080/get.php?username=x&password=y" rows="4"></textarea>
+      </div>
+      <div class="btn-row">
+        <button class="btn-primary" onclick="startScan('m3u')">▶ فحص M3U</button>
+        <button class="btn-stop" id="stop-m3u" onclick="stopScan()">■ إيقاف</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── MAC panel ── -->
+  <div class="panel" id="panel-mac">
+    <div class="form-box">
+      <div class="field">
+        <label>بوابات البث (Portal URLs)</label>
+        <textarea id="macPortal" placeholder="http://portal.server.com" rows="2"></textarea>
+      </div>
+      <div class="field">
+        <label>عناوين الماك (MAC Addresses)</label>
+        <textarea id="macList" placeholder="00:1A:79:XX:XX:XX" rows="2"></textarea>
+      </div>
+      <div class="btn-row">
+        <button class="btn-primary" onclick="startScan('mac')">▶ فحص MAC</button>
+        <button class="btn-stop" id="stop-mac" onclick="stopScan()">■ إيقاف</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Progress -->
+  <div class="progress-box" id="progBox">
+    <div class="prog-top">
+      <span id="progLabel">جاري الفحص...</span>
+      <span id="progTime">0s</span>
+    </div>
+    <div class="prog-track">
+      <div class="prog-fill" id="progFill"></div>
+    </div>
+    <div class="prog-stats">
+      <div class="stat-chip green"><div class="dot"></div><span id="st-active">0</span> نشط</div>
+      <div class="stat-chip red">  <div class="dot"></div><span id="st-failed">0</span> فاشل</div>
+      <div class="stat-chip blue"> <div class="dot"></div><span id="st-stream">0</span> بث ✓</div>
+      <div class="stat-chip amber"><div class="dot"></div><span id="st-trial">0</span> تجربة</div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="controls" id="controls">
+    <div class="cbar">
+      <span class="cbar-label">فلتر:</span>
+      <button class="pill on" id="flt-all" onclick="applyFilter('all',    this)">الكل  <span id="cnt-all">0</span></button>
+      <button class="pill"     onclick="applyFilter('active', this)">نشط   <span id="cnt-active">0</span></button>
+      <button class="pill"     onclick="applyFilter('failed', this)">فاشل  <span id="cnt-failed">0</span></button>
+    </div>
+    <div class="cbar">
+      <span class="cbar-label">ترتيب:</span>
+      <button class="pill on" id="srt-default" onclick="applySort('default', this)">الافتراضي</button>
+      <button class="pill"     onclick="applySort('speed',   this)">الأسرع</button>
+      <button class="pill"     onclick="applySort('channels',this)">أكثر قنوات</button>
+      <button class="pill"     onclick="applySort('expiry',  this)">أبعد انتهاء</button>
+      <button class="pill"     onclick="applySort('score',   this)">أعلى تقييم</button>
+    </div>
+    <div class="cbar">
+      <span class="cbar-label">تصدير:</span>
+      <button class="pill green-pill" onclick="exportCSV('working')">▶ يعمل فعلياً</button>
+      <button class="pill"            onclick="exportCSV('active')">⬇ كل النشطة</button>
+    </div>
+  </div>
+
+  <!-- Summary -->
+  <div class="summary" id="summary"></div>
+
+  <!-- Results -->
+  <div id="results"></div>
+
+</div>
+
+<script>
+// ═══════════════════════════════════════════════
+//  State
+// ═══════════════════════════════════════════════
+let allResults  = [];
+let activeES    = null;
+let timerIv     = null;
+let scanStart   = 0;
+let totalTasks  = 0;
+let doneCount   = 0;
+let liveActive  = 0;
+let liveFailed  = 0;
+let liveStream  = 0;
+let liveTrial   = 0;
+let activeTab   = 'xtream';
+let curFilter   = 'all';
+let curSort     = 'default';
+let m3uAnalysisEnabled = false;
+let currentJobId = null;  // للإلغاء
+
+// ═══════════════════════════════════════════════
+//  M3U analysis toggle
+// ═══════════════════════════════════════════════
+function toggleM3uAnalysis() {
+  m3uAnalysisEnabled = !m3uAnalysisEnabled;
+  const btn = document.getElementById('m3uToggleBtn');
+  if (m3uAnalysisEnabled) {
+    btn.classList.add('on');
+    btn.textContent = '📋 مفعل (Xtream فقط)';
+  } else {
+    btn.classList.remove('on');
+    btn.textContent = '📋 معطل';
+  }
+}
+
+// ═══════════════════════════════════════════════
+//  Tab
+// ═══════════════════════════════════════════════
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab').forEach(b => b.classList.remove('on'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('on'));
+  btn.classList.add('on');
+  document.getElementById('panel-' + name).classList.add('on');
+  activeTab = name;
+  resetUI();
+}
+
+// ═══════════════════════════════════════════════
+//  File upload
+// ═══════════════════════════════════════════════
+function loadFile(e) {
+  const f = e.target.files[0];
+  if (!f) return;
+  document.getElementById('fname').textContent = f.name;
+  const r = new FileReader();
+  r.onload = ev => { document.getElementById('creds').value = ev.target.result; };
+  r.readAsText(f);
+}
+
+// ═══════════════════════════════════════════════
+//  Build payload
+// ═══════════════════════════════════════════════
+function buildPayload(type) {
+  let payload = null;
+  if (type === 'xtream') {
+    const creds   = document.getElementById('creds').value.trim();
+    const servers = document.getElementById('servers').value.trim();
+    if (!creds || !servers) { alert('أدخل الحسابات والهوستات أولاً.'); return null; }
+    payload = { type, creds, servers };
+  } else if (type === 'm3u') {
+    const m3u = document.getElementById('m3uInput').value.trim();
+    if (!m3u) { alert('أدخل روابط M3U أولاً.'); return null; }
+    payload = { type, m3u };
+  } else if (type === 'mac') {
+    const macPortal = document.getElementById('macPortal').value.trim();
+    const macs      = document.getElementById('macList').value.trim();
+    if (!macPortal || !macs) { alert('أدخل البوابات والماك أولاً.'); return null; }
+    payload = { type, macPortal, macs };
+  }
+  if (payload) payload.m3u_analysis_enabled = m3uAnalysisEnabled;
+  return payload;
+}
+
+// ═══════════════════════════════════════════════
+//  Scan (SSE) مع دعم الإلغاء
+// ═══════════════════════════════════════════════
+async function startScan(type) {
+  const payload = buildPayload(type);
+  if (!payload) return;
+
+  stopScan();
+  resetUI();
+  allResults = [];
+  liveActive = liveFailed = liveStream = liveTrial = 0;
+  curFilter  = 'all';
+  curSort    = 'default';
+
+  document.querySelectorAll('.cbar .pill').forEach(p => p.classList.remove('on'));
+  const fltAllBtn = document.getElementById('flt-all');
+  if (fltAllBtn) fltAllBtn.classList.add('on');
+  const srtDefaultBtn = document.getElementById('srt-default');
+  if (srtDefaultBtn) srtDefaultBtn.classList.add('on');
+
+  try {
+    const resp = await fetch('/check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json();
+    if (data.error) { alert(data.error); return; }
+
+    const { job_id, total } = data;
+    currentJobId = job_id;
+    totalTasks = total;
+    doneCount  = 0;
+
+    document.getElementById('progBox').classList.add('show');
+    document.getElementById('progFill').style.width = '0%';
+    document.getElementById('progLabel').textContent = `جاري الفحص... (0 / ${total})`;
+    document.getElementById('st-active').textContent = '0';
+    document.getElementById('st-failed').textContent = '0';
+    document.getElementById('st-stream').textContent = '0';
+    document.getElementById('st-trial').textContent  = '0';
+    document.getElementById('progTime').textContent  = '0s';
+
+    const stopBtn = document.getElementById('stop-' + type);
+    if (stopBtn) stopBtn.classList.add('show');
+
+    scanStart = Date.now();
+    timerIv   = setInterval(() => {
+      const s = Math.floor((Date.now() - scanStart) / 1000);
+      document.getElementById('progTime').textContent = s + 's';
+    }, 1000);
+
+    activeES = new EventSource('/stream/' + job_id);
+
+    activeES.onmessage = function(ev) {
+      let item;
+      try { item = JSON.parse(ev.data); } catch { return; }
+      if (!item) return;
+      if (item.ping) return;
+      if (item.error && !item.server) return;
+      if (item.__done__) {
+        finishScan(type);
+        return;
+      }
+
+      doneCount++;
+      allResults.push(item);
+
+      if (item.auth_valid) {
+        liveActive++;
+        if (item.is_trial) liveTrial++;
+        if (item.stream_ok === true) liveStream++;
+      } else {
+        liveFailed++;
+      }
+
+      const pct = Math.round((doneCount / totalTasks) * 100);
+      document.getElementById('progFill').style.width  = pct + '%';
+      document.getElementById('progLabel').textContent = `جاري الفحص... (${doneCount} / ${totalTasks})`;
+      document.getElementById('st-active').textContent = liveActive;
+      document.getElementById('st-failed').textContent = liveFailed;
+      document.getElementById('st-stream').textContent = liveStream;
+      document.getElementById('st-trial').textContent  = liveTrial;
+
+      const idx = allResults.length - 1;
+      const cardHtml = buildCard(item, idx);
+      document.getElementById('results').insertAdjacentHTML('afterbegin', cardHtml);
+      updateCounts();
+
+      if (curFilter !== 'all') {
+        const type_ = item.auth_valid ? 'active' : 'failed';
+        if (type_ !== curFilter) {
+          const el = document.getElementById('card-' + idx);
+          if (el) el.classList.add('hidden');
+        }
+      }
+    };
+
+    activeES.onerror = function() {
+      finishScan(type);
+    };
+
+  } catch (err) {
+    alert('خطأ في الاتصال.');
+  }
+}
+
+// ── إلغاء حقيقي ──
+async function stopScan() {
+  if (currentJobId) {
+    try {
+      await fetch('/cancel/' + currentJobId, { method: 'POST' });
+    } catch (e) {}
+    currentJobId = null;
+  }
+  if (activeES) { activeES.close(); activeES = null; }
+  if (timerIv)  { clearInterval(timerIv); timerIv = null; }
+  document.querySelectorAll('.btn-stop').forEach(b => b.classList.remove('show'));
+}
+
+function finishScan(type) {
+  stopScan();
+  document.getElementById('progBox').classList.remove('show');
+
+  if (allResults.length > 0) {
+    document.getElementById('controls').classList.add('show');
+    updateCounts();
+    updateSummary();
+  }
+}
+
+function resetUI() {
+  stopScan();
+  document.getElementById('results').innerHTML   = '';
+  document.getElementById('progBox').classList.remove('show');
+  document.getElementById('controls').classList.remove('show');
+  document.getElementById('summary').classList.remove('show');
+}
+
+// ═══════════════════════════════════════════════
+//  Filter / Sort
+// ═══════════════════════════════════════════════
+function applyFilter(f, btn) {
+  curFilter = f;
+  document.querySelectorAll('.cbar').forEach((bar, i) => {
+    if (i === 0) bar.querySelectorAll('.pill').forEach(p => p.classList.remove('on'));
+  });
+  btn.classList.add('on');
+  document.querySelectorAll('.card').forEach(c => {
+    if (f === 'all') { c.classList.remove('hidden'); return; }
+    c.classList.toggle('hidden', c.dataset.type !== f);
+  });
+}
+
+function applySort(s, btn) {
+  curSort = s;
+  document.querySelectorAll('.cbar').forEach((bar, i) => {
+    if (i === 1) bar.querySelectorAll('.pill').forEach(p => p.classList.remove('on'));
+  });
+  btn.classList.add('on');
+
+  let sorted = [...allResults];
+  if (s === 'speed')    sorted.sort((a,b) => a.api_ms - b.api_ms);
+  if (s === 'channels') sorted.sort((a,b) => (b.channels_count||0) - (a.channels_count||0));
+  if (s === 'expiry')   sorted.sort((a,b) => {
+    if (a.exp_date === 'Unlimited') return -1;
+    if (b.exp_date === 'Unlimited') return 1;
+    const da = (a.exp_date && a.exp_date !== 'N/A') ? new Date(a.exp_date) : new Date(0);
+    const db = (b.exp_date && b.exp_date !== 'N/A') ? new Date(b.exp_date) : new Date(0);
+    return db - da;
+  });
+  if (s === 'score') sorted.sort((a,b) => (b.score||0) - (a.score||0));
+
+  const r = document.getElementById('results');
+  r.innerHTML = '';
+  sorted.forEach((item) => {
+    const origIdx = allResults.indexOf(item);
+    r.insertAdjacentHTML('beforeend', buildCard(item, origIdx));
+    if (curFilter !== 'all') {
+      const type_ = item.auth_valid ? 'active' : 'failed';
+      if (type_ !== curFilter) {
+        const el = document.getElementById('card-' + origIdx);
+        if (el) el.classList.add('hidden');
+      }
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════
+//  Counts / Summary
+// ═══════════════════════════════════════════════
+function updateCounts() {
+  const active = allResults.filter(r => r.auth_valid).length;
+  const failed = allResults.length - active;
+  document.getElementById('cnt-all').textContent    = allResults.length;
+  document.getElementById('cnt-active').textContent = active;
+  document.getElementById('cnt-failed').textContent = failed;
+}
+
+function updateSummary() {
+  const active  = allResults.filter(r => r.auth_valid).length;
+  const paid    = allResults.filter(r => r.auth_valid && !r.is_trial).length;
+  const trial   = allResults.filter(r => r.is_trial).length;
+  const streamOk= allResults.filter(r => r.stream_ok === true).length;
+  const s       = document.getElementById('summary');
+  s.classList.add('show');
+  s.textContent = `الإجمالي: ${allResults.length} | نشط: ${active} (مدفوع: ${paid} · تجربة: ${trial}) | بث يعمل: ${streamOk}`;
+}
+
+// ═══════════════════════════════════════════════
+//  Score badge helper
+// ═══════════════════════════════════════════════
+function scoreBadge(score) {
+  let bg = 'var(--red-dim)', border = 'var(--red-border)', text = '#f87171';
+  if (score >= 70) {
+    bg = 'var(--green-dim)'; border = 'var(--green-border)'; text = '#34d399';
+  } else if (score >= 40) {
+    bg = 'var(--amber-dim)'; border = 'var(--amber-border)'; text = '#fbbf24';
+  }
+  return `<span class="badge" style="background:${bg};border-color:${border};color:${text}">★ ${score}</span>`;
+}
+
+// ═══════════════════════════════════════════════
+//  Card builder (مع حماية البيانات)
+// ═══════════════════════════════════════════════
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+}
+
+function buildCard(r, idx) {
+  const isMAC  = (r.username || '').indexOf('MAC:') === 0;
+  const type_  = r.auth_valid ? 'active' : 'failed';
+  const mods   = r.modules || null;
+
+  const displayUsername = isMAC ? r.username : r.username;
+  const displayServer = r.server;
+
+  let badge = '';
+  if (r.error === 'CANCELLED') {
+    badge = `<span class="badge badge-cancelled">ملغي</span>`;
+  } else if (r.auth_valid) {
+    badge = r.is_trial
+      ? `<span class="badge badge-trial">TRIAL ${r.api_ms}ms</span>`
+      : `<span class="badge badge-ok">ACTIVE ${r.api_ms}ms</span>`;
+    badge += scoreBadge(r.score || 0);
+    if (r.rescued) {
+      badge += `<span class="badge" style="background:var(--amber-dim);border-color:var(--amber-border);color:#fbbf24">🛟 ${esc(r.rescue_method || '')}</span>`;
+    }
+  } else {
+    badge = `<span class="badge badge-fail">FAIL · ${esc(r.error||'Offline')}</span>`;
+  }
+
+  let miniTags = '';
+  if (r.auth_valid) {
+    if (r.exp_date && r.exp_date !== 'N/A')
+      miniTags += `<span class="mini-tag exp">📅 ${esc(r.exp_date)}</span>`;
+    if (r.stream_ok === true)
+      miniTags += `<span class="mini-tag ok">▶ LIVE</span>`;
+    else if (r.stream_ok === false)
+      miniTags += `<span class="mini-tag dead">✗ DEAD</span>`;
+    else if (r.stream_ok === null || r.stream_ok === undefined) {
+      // قد تكون حالة غير مؤكدة (مثل transcoder_detected)
+      if ((r.rescue_method || '').includes('transcoder_detected'))
+        miniTags += `<span class="mini-tag dead">⚠ TRANSCODER</span>`;
+      else
+        miniTags += `<span class="mini-tag dead">؟ غير مؤكد</span>`;
+    }
+    if (mods) {
+      miniTags += `<span class="mini-tag ${mods.vod    ? 'ok' : 'dead'}">🎬 VOD</span>`;
+      miniTags += `<span class="mini-tag ${mods.series ? 'ok' : 'dead'}">📚 Series</span>`;
+      miniTags += `<span class="mini-tag ${mods.epg    ? 'ok' : 'dead'}">🗓 EPG</span>`;
+    }
+    if (r.bandwidth_kbps && r.bandwidth_kbps > 0) {
+      const bw = r.bandwidth_kbps;
+      const bwClass = bw > 3000 ? 'ok' : (bw >= 800 ? 'exp' : 'dead');
+      miniTags += `<span class="mini-tag ${bwClass}">⚡ ${Math.round(bw)} kbps</span>`;
+    }
+  }
+
+  const coloured = (v, c) => `<span style="color:var(--${c})">${v}</span>`;
+  let rows = '';
+  rows += row('حالة الاتصال',
+    r.auth_valid ? coloured('متصل ومفعّل ✓','green') : coloured('فشل الاتصال ✗','red'));
+
+  if (r.rescued) {
+    rows += row('طريقة الإنقاذ', coloured(`🛟 ${esc(r.rescue_method || '')}`, 'amber'));
+  }
+
+  if (r.api_path)
+    rows += row('مسار API', `<span style="font-family:var(--mono);font-size:10px;color:var(--text-2)">${esc(r.api_path)}</span>`);
+
+  if (r.auth_valid) {
+    rows += row('البث الفعلي',
+      r.stream_ok === true  ? coloured('يعمل فعلياً ▶','green') :
+      r.stream_ok === false ? coloured('البث ميت ✗','red') :
+                              coloured('غير قابل للاختبار','text-2'));
+    rows += row('نوع الاشتراك',
+      r.sub_type === 'Trial' ? coloured('تجربة 🧪','amber') :
+      r.sub_type === 'Paid'  ? coloured('مدفوع 💳','green') :
+                               coloured('غير معروف','text-2'));
+    rows += row('تاريخ الانتهاء',
+      coloured(esc((r.exp_date && r.exp_date !== 'N/A') ? r.exp_date : 'غير متاح'), 'amber'));
+    rows += row('تاريخ الإنشاء',
+      esc((r.created_date && r.created_date !== 'N/A') ? r.created_date : 'غير متاح'));
+
+    rows += counterRow('icon-ch',     '📺', 'القنوات',   r.channels_count, 'counter-val-ch');
+    rows += counterRow('icon-vod',    '🎬', 'أفلام VOD', r.vod_count,      'counter-val-vod');
+    rows += counterRow('icon-series', '📚', 'المسلسلات', r.series_count,   'counter-val-series');
+
+    // عرض الاتصالات لـ Xtream دائماً، ولـ MAC إذا كانت متاحة
+    if (!isMAC || (r.max_connections && r.max_connections !== 'N/A')) {
+      rows += row('اتصالات (نشط / أقصى)',
+        `${esc(r.active_connections)} / ${esc(r.max_connections)}`);
+    }
+
+    if (mods) {
+      const chk = v => v ? coloured('✓','green') : coloured('✗','red');
+      rows += row('الوحدات المتاحة',
+        `Live ${chk(mods.live)} · VOD ${chk(mods.vod)} · Series ${chk(mods.series)} · EPG ${chk(mods.epg)}`);
+    }
+    rows += row('التقييم (Score)', scoreBadge(r.score || 0));
+    if (r.bandwidth_kbps && r.bandwidth_kbps > 0)
+      rows += row('سرعة البث المقاسة', coloured(`${Math.round(r.bandwidth_kbps)} kbps`, 'blue'));
+
+    if (r.geo) {
+      const geoTitle = esc(`${r.geo.ip || ''} · ${r.geo.org || ''}`);
+      rows += row('الموقع الجغرافي',
+        `<span title="${geoTitle}">🌍 ${esc(r.geo.country || '')} ${esc(r.geo.city || '')} · ${esc(r.geo.isp || '')}</span>`);
+    }
+
+    if (r.ssl_info) {
+      if (r.ssl_info.valid) {
+        rows += row('شهادة SSL',
+          coloured(`🔒 ${esc(r.ssl_info.tls_version || '')} (${esc(r.ssl_info.issuer || '')})`, 'green'));
+      } else {
+        rows += row('شهادة SSL',
+          coloured(`🔓 غير صالحة: ${esc(r.ssl_info.error || '')}`, 'red'));
+      }
+    }
+
+    if (r.m3u_analysis) {
+      const m = r.m3u_analysis;
+      const q = m.qualities || {};
+      const partialTag = m.partial ? ' <span style="color:var(--amber)">⚠ partial</span>' : '';
+      rows += row('تحليل M3U',
+        `📋 ${m.total_channels} ch · ${m.groups_count} groups · EPG ${m.has_epg ? '✓' : '✗'} · ` +
+        `HD:${q.HD||0} FHD:${q.FHD||0} SD:${q.SD||0} 4K:${q['4K']||0}${partialTag}`);
+    }
+  }
+  rows += row('الخطأ',
+    r.error ? coloured(esc(r.error),'amber') : coloured('لا يوجد ✓','green'));
+  rows += row('سرعة الاستجابة', `${esc(r.api_ms)} ms`);
+
+  if (r.diag && r.diag.includes('found:none'))
+    rows += row('تشخيص',
+      `<span style="font-family:var(--mono);font-size:9.5px;color:var(--text-3)">${esc(r.diag)}</span>`);
+
+  let credBox = `
+    <div class="cred-box">
+      <div class="cred-row">
+        <span style="color:var(--text-2)">البوابة / الخادم</span>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span class="cred-val">${esc(displayServer)}</span>
+          <button class="btn-copy" data-copy="${esc(displayServer)}">نسخ</button>
+        </div>
+      </div>
+      <div class="cred-row">
+        <span style="color:var(--text-2)">${isMAC ? 'MAC' : 'المستخدم'}</span>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span class="cred-val">${esc(displayUsername)}</span>
+          <button class="btn-copy" data-copy="${esc(displayUsername)}">نسخ</button>
+        </div>
+      </div>`;
+
+  // لا نعرض رابط M3U أو كلمة المرور إطلاقًا، حتى لو وصلت من الخادم (تمت إزالتها في الخادم)
+  credBox += `</div>`;
+
+  let bridgeBox = '';
+  if (isMAC && r.auth_valid) {
+    bridgeBox = `
+      <div class="cred-box" style="margin-top:8px;">
+        <div class="cred-row">
+          <span style="color:var(--text-2)">جسر M3U</span>
+          <span style="display:flex;gap:6px">
+            <button class="btn-copy" onclick="bridgeLive(${idx})">🔗 رابط حي</button>
+            <button class="btn-copy" onclick="bridgeSnap(${idx})">⬇ لقطة M3U</button>
+          </span>
+        </div>
+      </div>`;
+  }
+
+  return `
+    <div class="card" id="card-${idx}" data-type="${type_}">
+      <div class="card-head" onclick="toggleCard(${idx})">
+        <span class="card-idx">[${idx+1}]</span>
+        <div class="card-info">
+          <div class="card-title">${esc(displayUsername)} @ ${esc(displayServer)}</div>
+          ${miniTags ? `<div class="mini-tags">${miniTags}</div>` : ''}
+        </div>
+        <div class="card-right">
+          ${badge}
+          <button class="btn-copy" title="تصدير" onclick="event.stopPropagation();exportSingle(${idx})">⬇</button>
+          <span class="arrow">▼</span>
+        </div>
+      </div>
+      <div class="card-body">
+        ${rows}
+        ${credBox}
+        ${bridgeBox}
+      </div>
+    </div>`;
+}
+
+function row(label, val) {
+  return `<div class="row"><span class="row-label">${label}</span><span class="row-val">${val}</span></div>`;
+}
+
+function counterRow(iconClass, icon, label, count, valClass) {
+  const val = count ? count : '—';
+  return `<div class="row">
+      <span class="row-label"><span class="row-icon-chip ${iconClass}">${icon}</span>${label}</span>
+      <span class="row-val ${valClass}">${val}</span>
+    </div>`;
+}
+
+// ═══════════════════════════════════════════════
+//  Card toggle + copy
+// ═══════════════════════════════════════════════
+function toggleCard(idx) {
+  const c = document.getElementById('card-' + idx);
+  if (!c) return;
+  c.classList.toggle('open');
+  c.querySelectorAll('.btn-copy[data-copy]').forEach(btn => {
+    if (!btn._bound) {
+      btn._bound = true;
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        copyText(this.dataset.copy, this);
+      });
+    }
+  });
+}
+
+function copyText(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    const old = btn.textContent;
+    btn.textContent = '✓';
+    btn.style.color = 'var(--green)';
+    setTimeout(() => { btn.textContent = old; btn.style.color = ''; }, 1400);
+  }).catch(() => alert('فشل النسخ.'));
+}
+
+// ═══════════════════════════════════════════════
+//  Export (مع حماية البيانات)
+// ═══════════════════════════════════════════════
+function exportCSV(mode) {
+  let list = [];
+  if (mode === 'working') list = allResults.filter(r => r.auth_valid && r.stream_ok === true);
+  if (mode === 'active')  list = allResults.filter(r => r.auth_valid);
+  if (!list.length) { alert('لا توجد نتائج للتصدير.'); return; }
+  _downloadCSV(list, mode);
+}
+
+function exportSingle(idx) {
+  _downloadCSV([allResults[idx]], 'card');
+}
+
+function _downloadCSV(list, tag) {
+  // لا نُصدّر كلمة المرور أبدًا
+  const hdrs = ['النوع','الخادم','المستخدم','نوع الاشتراك',
+                'تاريخ الانتهاء','تاريخ الإنشاء','القنوات','البث','السرعة(ms)',
+                'التقييم','السرعة(kbps)','الدولة','SSL صالح','قنوات M3U محللة','طريقة الإنقاذ',
+                'أفلام VOD','مسلسلات'];
+  const rows = list.map(r => [
+    (r.username || '').indexOf('MAC:') === 0 ? 'MAC' : 'Xtream',
+    r.server,
+    r.username,
+    r.sub_type || '',
+    (r.exp_date && r.exp_date !== 'N/A') ? r.exp_date : '',
+    (r.created_date && r.created_date !== 'N/A') ? r.created_date : '',
+    r.channels_count || 0,
+    r.stream_ok === true ? 'OK' : (r.stream_ok === false ? 'DEAD' : 'N/A'),
+    r.api_ms,
+    r.score || 0,
+    r.bandwidth_kbps || 0,
+    (r.geo && r.geo.country) || '',
+    r.ssl_info ? (r.ssl_info.valid ? 'Valid' : 'Invalid') : '',
+    (r.m3u_analysis && r.m3u_analysis.total_channels) || '',
+    r.rescue_method || '',
+    r.vod_count || 0,
+    r.series_count || 0
+  ]);
+  const q    = v => '"' + String(v).replace(/"/g,'""') + '"';
+  const csv  = '\uFEFF' + [hdrs, ...rows].map(row => row.map(q).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const a    = document.createElement('a');
+  a.href     = URL.createObjectURL(blob);
+  a.download = tag + '_' + new Date().toISOString().slice(0,19).replace(/[:T]/g,'-') + '.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+// ═══════════════════════════════════════════════
+//  Bridge helpers
+// ═══════════════════════════════════════════════
+function _bridgeUrls(r) {
+  const base = location.origin;
+  const mac  = r.username.replace(/^MAC:\s*/i, '');
+  const p    = encodeURIComponent(r.server);
+  const m    = encodeURIComponent(mac);
+  return {
+    live: `${base}/bridge/playlist?portal=${p}&mac=${m}&mode=live`,
+    snap: `${base}/bridge/playlist?portal=${p}&mac=${m}&mode=snap`
+  };
+}
+
+function bridgeLive(idx) {
+  const u = _bridgeUrls(allResults[idx]);
+  navigator.clipboard.writeText(u.live).then(() => {
+    alert('تم نسخ الرابط الحي ✔\nالصقه في TiviMate / VLC.\nيجب أن تبقى الأداة تعمل أثناء المشاهدة.');
+  }).catch(() => alert('فشل النسخ.'));
+}
+
+function bridgeSnap(idx) {
+  const u = _bridgeUrls(allResults[idx]);
+  const r = allResults[idx];
+  fetch(u.snap).then(res => res.text()).then(text => {
+    const blob = new Blob([text], { type: 'audio/x-mpegurl' });
+    const a    = document.createElement('a');
+    a.href     = URL.createObjectURL(blob);
+    a.download = 'snap_' + r.username.replace(/^MAC:\s*/i,'').replace(/:/g,'-') + '.m3u';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }).catch(() => alert('تعذر توليد اللقطة.'));
+}
+</script>
+</body>
+</html>
