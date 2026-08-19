@@ -1,8 +1,8 @@
 # ══════════════════════════════════════════════════════════════
-#  IPTV Pro Inspector — v5.9.2-patched (PWA Enabled)
+#  IPTV Pro Inspector — v5.9.2-patched (PWA + Stability)
 #  (جميع الإصلاحات + دعم عدد الاتصالات + إصلاح ffmpeg + تمييز الرفض
 #   + محاولات إضافية لاستخراج تاريخ الانتهاء وعدد الأجهزة
-#   + دعم PWA كامل)
+#   + دعم PWA كامل + تحسينات الذاكرة والاستقرار)
 # ══════════════════════════════════════════════════════════════
 from flask import Flask, render_template, request, jsonify, redirect, Response, stream_with_context
 import time, requests, urllib3, threading, re, json, random, uuid, socket, ssl, ipaddress, os
@@ -10,6 +10,7 @@ import queue as queuelib
 import hashlib
 import struct
 import zlib
+import gc
 from datetime import datetime, timezone
 from urllib.parse import urlparse, quote, urlunparse, urljoin, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -820,7 +821,7 @@ def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_c
     return modules
 
 # ══════════════════════════════════════════════════════════════
-#  VOD / Series counters
+#  VOD / Series counters (خفيفة)
 # ══════════════════════════════════════════════════════════════
 
 def _fetch_xtream_vod_count(session, api_url, job_id=None):
@@ -851,38 +852,34 @@ def _fetch_xtream_series_count(session, api_url, job_id=None):
         pass
     return 0
 
-def _fetch_mac_vod_count(session, portal_url, api_path, headers, cookies, job_id=None):
+def _fetch_mac_count_light(session, portal_url, api_path, headers, cookies, media_type, job_id=None):
+    """
+    جلب عدد العناصر (VOD/Series) بدون تحميل البيانات كاملة.
+    """
     if job_id and is_cancelled(job_id):
         raise CancelException("Cancelled")
     try:
         r = safe_request(session, f"{portal_url}{api_path}",
-                         params={"type": "vod", "action": "get_ordered_list",
+                         params={"type": media_type, "action": "get_ordered_list",
                                  "p": "1", "JsHttpRequest": "1-xml"},
                          headers=headers, cookies=cookies, timeout=8, verify=False)
         if r.status_code == 200:
             js = (r.json() or {}).get("js", {}) or {}
             if isinstance(js, dict):
-                return int(js.get("total_items") or len(js.get("data", [])) or 0)
+                # نقرأ total_items فقط، مع تجاهل data
+                total = js.get("total_items")
+                if total is not None:
+                    try:
+                        return int(total)
+                    except (ValueError, TypeError):
+                        pass
+                # fallback: عدّ القائمة إذا كانت صغيرة
+                data = js.get("data", [])
+                return len(data) if isinstance(data, list) else 0
             elif isinstance(js, list):
                 return len(js)
-    except Exception:
-        pass
-    return 0
-
-def _fetch_mac_series_count(session, portal_url, api_path, headers, cookies, job_id=None):
-    if job_id and is_cancelled(job_id):
-        raise CancelException("Cancelled")
-    try:
-        r = safe_request(session, f"{portal_url}{api_path}",
-                         params={"type": "series", "action": "get_ordered_list",
-                                 "p": "1", "JsHttpRequest": "1-xml"},
-                         headers=headers, cookies=cookies, timeout=8, verify=False)
-        if r.status_code == 200:
-            js = (r.json() or {}).get("js", {}) or {}
-            if isinstance(js, dict):
-                return int(js.get("total_items") or len(js.get("data", [])) or 0)
-            elif isinstance(js, list):
-                return len(js)
+    except CancelException:
+        raise
     except Exception:
         pass
     return 0
@@ -2156,6 +2153,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 if exp:
                     res["exp_date"] = exp
 
+                # ── محاولات إضافية خفيفة ──
                 def _safe_get_json(params, tag):
                     try:
                         if job_id and is_cancelled(job_id):
@@ -2251,13 +2249,14 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     if keys:
                         res["diag"] += " | keys:" + ",".join(dict.fromkeys(keys))[:140]
 
-            # نهاية مع semaphore
+            # نهاية with semaphore
 
         except _LockBusy:
             res["error"] = "Portal busy (semaphore timeout)"
             res["failure_reason"] = "PORTAL_BUSY"
             return sanitize_result(res)
 
+        # ── بعد الخروج من القفل، نستكمل العمليات البطيئة ──
         first_ch_id = None
         cmds = []
         try:
@@ -2277,6 +2276,8 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 elif isinstance(cj, list):
                     res["channels_count"] = len(cj)
                     data_list = cj
+
+                # أخذ عينة موزعة بأقل استهلاك ممكن
                 sample = []
                 if data_list:
                     step = max(1, len(data_list) // 15)
@@ -2284,6 +2285,11 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     while i < len(data_list) and len(sample) < 20:
                         sample.append(data_list[i])
                         i += step
+                # تحرير البيانات الضخمة فورًا
+                del data_list
+                del cj
+                gc.collect()
+
                 for ch in sample:
                     if isinstance(ch, dict) and first_ch_id is None and ch.get("id"):
                         first_ch_id = ch.get("id")
@@ -2309,6 +2315,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
         except Exception:
             pass
 
+        # Module detection
         try:
             if job_id and is_cancelled(job_id):
                 raise CancelException("Cancelled")
@@ -2321,23 +2328,27 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
         except Exception:
             pass
 
+        # VOD / Series counters (خفيفة)
         try:
             if res["modules"].get("vod"):
-                res["vod_count"] = _fetch_mac_vod_count(
-                    session, portal_url, api_path, auth_headers, cookies, job_id)
+                res["vod_count"] = _fetch_mac_count_light(
+                    session, portal_url, api_path, auth_headers, cookies,
+                    "vod", job_id)
         except CancelException:
             raise
         except Exception:
             res["vod_count"] = 0
         try:
             if res["modules"].get("series"):
-                res["series_count"] = _fetch_mac_series_count(
-                    session, portal_url, api_path, auth_headers, cookies, job_id)
+                res["series_count"] = _fetch_mac_count_light(
+                    session, portal_url, api_path, auth_headers, cookies,
+                    "series", job_id)
         except CancelException:
             raise
         except Exception:
             res["series_count"] = 0
 
+        # Enhancement Layer
         if res["auth_valid"]:
             host, port, scheme = None, None, None
             try:
@@ -2377,6 +2388,12 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 res["score"] = _compute_score(res)
             except Exception:
                 res["score"] = 0
+
+        # تحرير نهائي
+        del auth_headers
+        del cookies
+        del session
+        gc.collect()
 
         return sanitize_result(res)
 
@@ -2538,7 +2555,13 @@ def check_servers():
             def _run_mac(a, b, c):
                 return test_mac_portal(a, b, job_id)
             fn_map = {"xtream": _run_xtream, "mac": _run_mac}
-            with ThreadPoolExecutor(max_workers=20) as ex:
+
+            # تحديد عدد العمال حسب نوع الفحص
+            max_workers = 20
+            if scan_type == "mac":
+                max_workers = 5
+
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 fmap = {}
                 for t in tasks:
                     if is_cancelled(job_id):
@@ -2555,6 +2578,9 @@ def check_servers():
                             if job_id in _JOBS:
                                 _JOBS[job_id]["done"] += 1
                         q.put(result)
+                        # تحرير الذاكرة بعد كل نتيجة
+                        if scan_type == "mac":
+                            gc.collect()
                     except Exception as e:
                         q.put({
                             "error": f"Worker future error: {str(e)[:100]}",
@@ -2600,7 +2626,7 @@ def stream_results(job_id):
         q = job["q"]
         while True:
             try:
-                item = q.get(timeout=30)
+                item = q.get(timeout=20)
             except queuelib.Empty:
                 yield 'data: {"ping":1}\n\n'
                 continue
