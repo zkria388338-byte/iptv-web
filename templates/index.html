@@ -1,10 +1,13 @@
-<!-- IPTV Pro Inspector — v5.9.2-patched (Final) -->
+<!-- IPTV Pro Inspector — v5.9.2-patched (PWA Enabled) -->
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>IPTV Pro Inspector</title>
+<meta name="theme-color" content="#3b82f6">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png">
 <style>
 :root {
   --bg-base:           #111114;
@@ -538,7 +541,10 @@ input[type="file"] { display: none; }
   <!-- Header -->
   <div class="hdr">
     <div class="hdr-title">IPTV <span>PRO</span> INSPECTOR</div>
-    <div class="badge-ver">v5.9.2-patched</div>
+    <div style="display:flex; align-items:center; gap:8px;">
+      <button id="installBtn" class="pill" style="display:none;">📲 تثبيت التطبيق</button>
+      <div class="badge-ver">v5.9.2-patched</div>
+    </div>
   </div>
 
   <!-- Tabs -->
@@ -1006,7 +1012,6 @@ function buildCard(r, idx) {
     else if (r.stream_ok === false)
       miniTags += `<span class="mini-tag dead">✗ DEAD</span>`;
     else if (r.stream_ok === null || r.stream_ok === undefined) {
-      // قد تكون حالة غير مؤكدة (مثل transcoder_detected)
       if ((r.rescue_method || '').includes('transcoder_detected'))
         miniTags += `<span class="mini-tag dead">⚠ TRANSCODER</span>`;
       else
@@ -1054,7 +1059,6 @@ function buildCard(r, idx) {
     rows += counterRow('icon-vod',    '🎬', 'أفلام VOD', r.vod_count,      'counter-val-vod');
     rows += counterRow('icon-series', '📚', 'المسلسلات', r.series_count,   'counter-val-series');
 
-    // عرض الاتصالات لـ Xtream دائماً، ولـ MAC إذا كانت متاحة
     if (!isMAC || (r.max_connections && r.max_connections !== 'N/A')) {
       rows += row('اتصالات (نشط / أقصى)',
         `${esc(r.active_connections)} / ${esc(r.max_connections)}`);
@@ -1119,7 +1123,6 @@ function buildCard(r, idx) {
         </div>
       </div>`;
 
-  // لا نعرض رابط M3U أو كلمة المرور إطلاقًا، حتى لو وصلت من الخادم (تمت إزالتها في الخادم)
   credBox += `</div>`;
 
   let bridgeBox = '';
@@ -1213,7 +1216,6 @@ function exportSingle(idx) {
 }
 
 function _downloadCSV(list, tag) {
-  // لا نُصدّر كلمة المرور أبدًا
   const hdrs = ['النوع','الخادم','المستخدم','نوع الاشتراك',
                 'تاريخ الانتهاء','تاريخ الإنشاء','القنوات','البث','السرعة(ms)',
                 'التقييم','السرعة(kbps)','الدولة','SSL صالح','قنوات M3U محللة','طريقة الإنقاذ',
@@ -1280,6 +1282,38 @@ function bridgeSnap(idx) {
     URL.revokeObjectURL(a.href);
   }).catch(() => alert('تعذر توليد اللقطة.'));
 }
+</script>
+
+<!-- PWA Script -->
+<script>
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js')
+    .then(() => console.log('Service Worker registered'))
+    .catch(err => console.error('SW registration failed', err));
+}
+
+let deferredPrompt;
+const installBtn = document.getElementById('installBtn');
+
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredPrompt = e;
+  installBtn.style.display = 'block';
+});
+
+installBtn.addEventListener('click', async () => {
+  if (!deferredPrompt) return;
+  deferredPrompt.prompt();
+  const { outcome } = await deferredPrompt.userChoice;
+  if (outcome === 'accepted') {
+    installBtn.style.display = 'none';
+  }
+  deferredPrompt = null;
+});
+
+window.addEventListener('appinstalled', () => {
+  installBtn.style.display = 'none';
+});
 </script>
 </body>
 </html>

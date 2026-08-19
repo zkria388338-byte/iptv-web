@@ -1,12 +1,15 @@
 # ══════════════════════════════════════════════════════════════
-#  IPTV Pro Inspector — v5.9.2-patched (Final + Extra Subscription Enrichment)
+#  IPTV Pro Inspector — v5.9.2-patched (PWA Enabled)
 #  (جميع الإصلاحات + دعم عدد الاتصالات + إصلاح ffmpeg + تمييز الرفض
-#   + محاولات إضافية لاستخراج تاريخ الانتهاء وعدد الأجهزة)
+#   + محاولات إضافية لاستخراج تاريخ الانتهاء وعدد الأجهزة
+#   + دعم PWA كامل)
 # ══════════════════════════════════════════════════════════════
 from flask import Flask, render_template, request, jsonify, redirect, Response, stream_with_context
 import time, requests, urllib3, threading, re, json, random, uuid, socket, ssl, ipaddress, os
 import queue as queuelib
 import hashlib
+import struct
+import zlib
 from datetime import datetime, timezone
 from urllib.parse import urlparse, quote, urlunparse, urljoin, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -17,22 +20,134 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 app = Flask(__name__)
 
 # ══════════════════════════════════════════════════════════════
+#  دالة توليد PNG بسيطة (لأيقونات PWA)
+# ══════════════════════════════════════════════════════════════
+def _generate_png(width, height, rgb=(59, 130, 246)):
+    def chunk(typ, data):
+        c = struct.pack('>I', len(data)) + typ + data
+        c += struct.pack('>I', zlib.crc32(typ + data) & 0xffffffff)
+        return c
+
+    sig = b'\x89PNG\r\n\x1a\n'
+    ihdr = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
+    raw = b''
+    for _ in range(height):
+        raw += b'\x00'  # filter none
+        raw += bytes(rgb) * width
+    idat = zlib.compress(raw)
+    return sig + chunk(b'IHDR', ihdr) + chunk(b'IDAT', idat) + chunk(b'IEND', b'')
+
+# ══════════════════════════════════════════════════════════════
+#  PWA Routes
+# ══════════════════════════════════════════════════════════════
+
+@app.route('/manifest.webmanifest')
+def manifest():
+    manifest = {
+        "name": "IPTV Pro Inspector",
+        "short_name": "IPTV Inspector",
+        "description": "أداة فحص اشتراكات IPTV بدقة عالية",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#111114",
+        "theme_color": "#3b82f6",
+        "icons": [
+            {
+                "src": "/static/icons/icon-192.png",
+                "sizes": "192x192",
+                "type": "image/png",
+                "purpose": "any maskable"
+            },
+            {
+                "src": "/static/icons/icon-512.png",
+                "sizes": "512x512",
+                "type": "image/png",
+                "purpose": "any maskable"
+            }
+        ]
+    }
+    return Response(json.dumps(manifest, ensure_ascii=False), mimetype='application/manifest+json')
+
+@app.route('/sw.js')
+def service_worker():
+    sw_js = """
+const CACHE_NAME = 'iptv-inspector-v1';
+const ASSETS = [
+  '/',
+  '/manifest.webmanifest',
+  '/static/icons/icon-192.png',
+  '/static/icons/icon-512.png'
+];
+
+self.addEventListener('install', event => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS))
+  );
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', event => {
+  event.waitUntil(
+    caches.keys().then(keys => Promise.all(
+      keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key))
+    ))
+  );
+  self.clients.claim();
+});
+
+self.addEventListener('fetch', event => {
+  if (event.request.method !== 'GET') return;
+  // لا نتدخل في EventSource أو طلبات الفحص
+  if (event.request.url.includes('/stream/') ||
+      event.request.url.includes('/check') ||
+      event.request.url.includes('/cancel/')) {
+    return;
+  }
+  // استراتيجية Cache-First للأصول الثابتة
+  if (ASSETS.includes(new URL(event.request.url).pathname)) {
+    event.respondWith(
+      caches.match(event.request).then(cached => cached || fetch(event.request))
+    );
+    return;
+  }
+  // Network-First مع fallback للواجهة الرئيسية
+  event.respondWith(
+    fetch(event.request)
+      .then(res => {
+        const clone = res.clone();
+        caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
+        return res;
+      })
+      .catch(() => caches.match('/'))
+  );
+});
+"""
+    return Response(sw_js, mimetype='application/javascript')
+
+@app.route('/static/icons/icon-192.png')
+def icon_192():
+    return Response(_generate_png(192, 192), mimetype='image/png')
+
+@app.route('/static/icons/icon-512.png')
+def icon_512():
+    return Response(_generate_png(512, 512), mimetype='image/png')
+
+# ══════════════════════════════════════════════════════════════
 #  API Key (اختياري)
 # ══════════════════════════════════════════════════════════════
 API_KEY = os.environ.get("API_KEY", "")
 
 def require_api_key():
-    """إذا تم تعيين API_KEY في البيئة، يجب تمريره كـ ?key= في الطلبات."""
     if API_KEY and request.args.get("key") != API_KEY:
         return jsonify({"error": "Invalid API key"}), 401
     return None
 
 # ══════════════════════════════════════════════════════════════
-#  Constants & Limits (الإصلاح 1: حدود الإدخال)
+#  Constants & Limits
 # ══════════════════════════════════════════════════════════════
 
-MAX_TASKS = 500                     # حد أقصى لعدد المهام
-MAX_INPUT_LINES = 200               # حد أقصى لعدد الأسطر المدخلة
+MAX_TASKS = 500
+MAX_INPUT_LINES = 200
 
 HEADERS = {
     "User-Agent": "iMPlayer/Mobile (Android)",
@@ -47,7 +162,6 @@ MAG_UA_POOL = [
     "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/534.34 (KHTML, like Gecko) MAG250 stbapp ver: 2 rev: 250 Safari/534.34",
 ]
 
-# توليد SN وUID فريدين من عنوان MAC
 def _get_mag_sn_uid(mac_address):
     mac_clean = mac_address.replace(":", "").replace("-", "").upper()
     sn = mac_clean[:12] if len(mac_clean) >= 12 else mac_clean.ljust(12, '0')
@@ -67,24 +181,22 @@ PORTAL_API_PATHS = [
 _PATH_CACHE = {}
 _DISC_LOCKS = {}
 _PORTAL_SEM = {}
-_GLOB_LOCK  = threading.Lock()
-_JOBS       = {}
-_JOBS_LOCK  = threading.Lock()
+_GLOB_LOCK = threading.Lock()
+_JOBS = {}
+_JOBS_LOCK = threading.Lock()
 
-# ── إلغاء المهام (الإصلاح 2) ──
 _CANCEL_FLAG = {}
 _CANCEL_LOCK = threading.Lock()
 
 class CancelException(Exception):
-    """يُرفع عند طلب إلغاء المهمة."""
     pass
 
 # ══════════════════════════════════════════════════════════════
-#  v5.9 FIX 2 — bounded DNS resolution
+#  Bounded DNS resolution
 # ══════════════════════════════════════════════════════════════
 
-_DNS_CACHE     = {}
-_DNS_LOCK      = threading.Lock()
+_DNS_CACHE = {}
+_DNS_LOCK = threading.Lock()
 _DNS_CACHE_TTL = 600
 
 def _is_ip_literal(host):
@@ -97,34 +209,27 @@ def _is_ip_literal(host):
 def _resolve_host_bounded(hostname, timeout=5):
     if _is_ip_literal(hostname):
         return hostname
-
     now = time.time()
     with _DNS_LOCK:
         cached = _DNS_CACHE.get(hostname)
         if cached and (now - cached[1] < _DNS_CACHE_TTL):
             return cached[0]
-
     result_box = {}
-
     def _resolve():
         try:
             result_box["ip"] = socket.gethostbyname(hostname)
         except Exception as e:
             result_box["exc"] = e
-
     t = threading.Thread(target=_resolve, daemon=True)
     t.start()
     t.join(timeout)
-
     if t.is_alive():
         raise socket.timeout(f"DNS resolution timed out for {hostname}")
     if "exc" in result_box:
         raise result_box["exc"]
-
     ip = result_box.get("ip")
     if ip is None:
         raise socket.gaierror(f"DNS resolution failed for {hostname}")
-
     with _DNS_LOCK:
         if len(_DNS_CACHE) > 1000:
             _DNS_CACHE.clear()
@@ -134,7 +239,7 @@ def _resolve_host_bounded(hostname, timeout=5):
 class _LockBusy(Exception):
     pass
 
-_DISC_LOCK_TIMEOUT  = 30
+_DISC_LOCK_TIMEOUT = 30
 _PORTAL_SEM_TIMEOUT = 600
 
 class _BoundedGuard:
@@ -167,10 +272,8 @@ def safe_request(session, url, timeout=5, headers=None, cookies=None,
         ip = _resolve_host_bounded(hostname, timeout=5)
     except Exception as dns_exc:
         raise requests.exceptions.ConnectionError(f"DNS resolution failed: {dns_exc}")
-
     req_headers = dict(headers) if headers else {}
     req_headers['Host'] = hostname
-
     if parsed.scheme == 'http':
         netloc = parsed.netloc
         if ':' in netloc:
@@ -258,7 +361,6 @@ def _cleanup_caches():
                 _PORTAL_SEM.pop(first_key, None)
         except Exception:
             pass
-        # ── الإصلاح 7: تنظيف _PATH_CACHE ──
         try:
             stale = []
             for k, v in _PATH_CACHE.items():
@@ -306,7 +408,7 @@ def _cleanup_caches():
         pass
 
 # ══════════════════════════════════════════════════════════════
-#  Helpers (مع تحسين التواريخ والمهلات)
+#  Helpers
 # ══════════════════════════════════════════════════════════════
 
 def discover_api_path(session, portal_url, headers, cookies):
@@ -391,28 +493,23 @@ def _scan_date_in_values(d):
     return None
 
 def _looks_blocked(obj):
-    """يفحص القيم فقط بحثاً عن دليل حظر صريح، ويتجاهل أسماء المفاتيح الفارغة.
-    تم توسيع نطاق الفحص ليشمل status وقيم أخرى."""
     if isinstance(obj, dict):
         for k, v in obj.items():
             kl = str(k).lower()
             if kl in ("blocked", "is_blocked", "block_reason", "restricted"):
-                if str(v).strip() not in ("", "0", "None", "null",
-                                          "False", "false", "[]", "{}"):
+                if str(v).strip() not in ("", "0", "None", "null", "False", "false", "[]", "{}"):
                     return True
             if kl == "status":
                 if isinstance(v, str):
                     status_l = v.lower().strip()
-                    if status_l in ("blocked", "disabled", "suspended",
-                                    "expired", "inactive", "banned", "offline",
+                    if status_l in ("blocked", "disabled", "suspended", "expired", "inactive", "banned", "offline",
                                     "موقوف", "محظور", "معطل"):
                         return True
             if isinstance(v, str):
                 s = v.lower()
                 blocked_phrases = [
-                    "your stb is blocked", "call the provider",
-                    "stb blocked", "stb is blocked", "account blocked",
-                    "account suspended", "account expired", "subscription expired",
+                    "your stb is blocked", "call the provider", "stb blocked", "stb is blocked",
+                    "account blocked", "account suspended", "account expired", "subscription expired",
                     "device banned", "محظور", "موقوف", "معطل", "ممنوع"
                 ]
                 if any(phrase in s for phrase in blocked_phrases):
@@ -426,16 +523,14 @@ def _looks_blocked(obj):
     elif isinstance(obj, str):
         s = obj.lower()
         blocked_phrases = [
-            "your stb is blocked", "call the provider",
-            "stb blocked", "stb is blocked", "account blocked",
-            "account suspended", "account expired", "subscription expired",
+            "your stb is blocked", "call the provider", "stb blocked", "stb is blocked",
+            "account blocked", "account suspended", "account expired", "subscription expired",
             "device banned", "محظور", "موقوف", "معطل", "ممنوع"
         ]
         if any(phrase in s for phrase in blocked_phrases):
             return True
     return False
 
-# ── الإصلاح 9: parse_m3u_line محسّنة ──
 def parse_m3u_line(line):
     line = line.strip()
     parsed = urlparse(line)
@@ -457,7 +552,6 @@ def normalize_portal_url(p):
         p = p[:-2]
     return p.rstrip('/')
 
-# ── الإصلاح 1 (المفقود): _normalize_stream_url ──
 def _normalize_stream_url(raw_url, portal_url):
     if not raw_url:
         return None
@@ -467,13 +561,11 @@ def _normalize_stream_url(raw_url, portal_url):
     base = f"{parsed_portal.scheme}://{parsed_portal.netloc}"
     return urljoin(base, raw_url)
 
-# ── الإصلاح 3: دالة تعقيم النتائج (إزالة كلمات المرور وروابط M3U) ──
 def sanitize_result(res):
     res.pop("password", None)
     res.pop("m3u_url", None)
     return res
 
-# ── الإصلاح 9: اختبار بث أوسع (10 قنوات بدل 3) ──
 def _check_xtream_stream(session, server_url, username, password, stream_ids, job_id=None):
     hard_fail = False
     for sid in stream_ids[:10]:
@@ -500,12 +592,6 @@ def _check_xtream_stream(session, server_url, username, password, stream_ids, jo
                 continue
     return False if hard_fail else None
 
-# ══════════════════════════════════════════════════════════════
-#  v5.9.2 FIX — اختبار بث MAC بهوية جلسة الـ STB الكاملة
-#  (MAG UA + كوكيز mac + Bearer token) لأن خوادم البث تربط
-#  الرابط بالجلسة وترفض أي هوية أخرى بـ 403
-#  تم تعديل التعامل مع transcoder و ffmpeg + تمييز الرفض
-# ══════════════════════════════════════════════════════════════
 def _check_mac_stream(session, portal_url, api_path, headers, cookies, cmds, job_id=None, diag=None):
     explicit_blocked = False
     stb_headers = {k: v for k, v in (headers or {}).items()
@@ -548,29 +634,22 @@ def _check_mac_stream(session, portal_url, api_path, headers, cookies, cmds, job
         u = str(u or "").strip()
         if not u:
             return None
-        # إصلاح أوامر ffmpeg: اقتطاع "ffmpeg" وأي مسافات بعدها
         if u.lower().startswith("ffmpeg"):
             u = re.sub(r'^ffmpeg\s+', '', u, flags=re.IGNORECASE).strip()
-        # دعم ffrt://
         if u.startswith("ffrt://"):
             u = "http://" + u[len("ffrt://"):]
         return _normalize_stream_url(u, portal_url)
 
     def _extract_real_urls(cmd_str, portal_base):
         s = str(cmd_str or "")
-        # إزالة أي كلمة ffmpeg في بداية النص حتى لا تتداخل مع الاستخراج
         s_clean = re.sub(r'^ffmpeg\s+', '', s, flags=re.IGNORECASE)
         urls = []
-        # روابط http/https مباشرة
         for m in re.finditer(r'https?://[^\s\'"<>]+', s_clean):
             urls.append(m.group(0))
-        # مسارات play/live
         for m in re.finditer(r'(/play/live\.(?:php|m3u8)[^\s\'"<>\)]*)', s_clean):
             urls.append(urljoin(portal_base + "/", m.group(1)))
-        # مسارات PHP عامة
         for m in re.finditer(r'(/[A-Za-z0-9_/]+\.php\?[^\s\'"<>]+)', s_clean):
             urls.append(urljoin(portal_base + "/", m.group(1)))
-        # إزالة التكرار مع الحفاظ على الترتيب
         seen = set()
         uniq = []
         for u in urls:
@@ -580,7 +659,6 @@ def _check_mac_stream(session, portal_url, api_path, headers, cookies, cmds, job
         return uniq
 
     def _is_transcoder_cmd(s):
-        """اكتشاف أوامر ffmpeg/transcoder"""
         s_lower = str(s or "").lower()
         return any(kw in s_lower for kw in ["ffmpeg", "avconv", "transcode", "/play/live.php"])
 
@@ -593,15 +671,11 @@ def _check_mac_stream(session, portal_url, api_path, headers, cookies, cmds, job
             direct_url = _prep(cmd)
             if direct_url and len(sample_urls) < 3:
                 sample_urls.append(("dir", direct_url[:150]))
-
-            # اختبار الرابط المباشر
             s1 = None
             if direct_url and urlparse(direct_url).scheme in ("http", "https"):
                 s1 = _try(direct_url, f"cl{i}:dir")
                 if s1 is not None and s1 < 400:
                     return True
-
-            # اختبار create_link
             params = {"type": "itv", "action": "create_link", "cmd": cmd,
                       "forced": "1", "JsHttpRequest": "1-xml"}
             r = safe_request(session, f"{portal_url}{api_path}", params=params,
@@ -613,7 +687,6 @@ def _check_mac_stream(session, portal_url, api_path, headers, cookies, cmds, job
             if r.status_code != 200:
                 if r.status_code in (401, 403):
                     explicit_blocked = True
-                # لا نعتبر الأخطاء الأخرى فشلاً قاطعاً
                 d(f"cl{i}:clHTTP{r.status_code}")
                 continue
             js = (r.json() or {}).get("js", "") or {}
@@ -621,8 +694,6 @@ def _check_mac_stream(session, portal_url, api_path, headers, cookies, cmds, job
             link_url = _prep(raw_url)
             if link_url and len(sample_urls) < 3:
                 sample_urls.append(("link", link_url[:150]))
-
-            # استخراج الروابط الحقيقية من أوامر ffmpeg
             extracted = _extract_real_urls(raw_url, portal_base)
             for j, eu in enumerate(extracted[:3]):
                 if job_id and is_cancelled(job_id):
@@ -633,20 +704,15 @@ def _check_mac_stream(session, portal_url, api_path, headers, cookies, cmds, job
                 if s is not None and s < 400:
                     d(f"cl{i}:ext{j}:OK")
                     return True
-                # _try ستقوم بتحديث explicit_blocked تلقائياً
-
-            # اكتشاف نمط ffmpeg/transcoder (بعد فشل الروابط المستخرجة)
             if _is_transcoder_cmd(raw_url) or _is_transcoder_cmd(cmd):
                 transcoder_mode = True
                 d(f"cl{i}:transcoder")
                 continue
-
             s2 = None
             if link_url and urlparse(link_url).scheme in ("http", "https"):
                 s2 = _try(link_url, f"cl{i}:link")
                 if s2 is not None and s2 < 400:
                     return True
-                # _try ستقوم بتحديث explicit_blocked تلقائياً
             d(f"cl{i}:dir:{s1},link:{s2},ext:{len(extracted)}")
         except CancelException:
             raise
@@ -658,20 +724,15 @@ def _check_mac_stream(session, portal_url, api_path, headers, cookies, cmds, job
         for tag, url in sample_urls[:4]:
             d(f"sample_{tag}:{url}")
 
-    # إذا حصلنا على رفض صريح => البث ميت
     if explicit_blocked:
         return False
-
-    # إذا اكتشفنا نمط transcoder ولم نحصل على رفض صريح => غير مؤكد
     if transcoder_mode:
         d("TRANSCODER_DETECTED")
         return "transcoder_detected"
-
-    # في الحالات الأخرى => غير قابل للاختبار
     return None
 
 # ══════════════════════════════════════════════════════════════
-#  Module Detection (VOD / Series / EPG) — مع تحسين المهلات
+#  Module Detection
 # ══════════════════════════════════════════════════════════════
 
 def _detect_xtream_modules(session, api_url, first_stream_id=None, job_id=None):
@@ -758,7 +819,9 @@ def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_c
             pass
     return modules
 
-# ── VOD / Series total counters ──────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+#  VOD / Series counters
+# ══════════════════════════════════════════════════════════════
 
 def _fetch_xtream_vod_count(session, api_url, job_id=None):
     if job_id and is_cancelled(job_id):
@@ -825,23 +888,19 @@ def _fetch_mac_series_count(session, portal_url, api_path, headers, cookies, job
     return 0
 
 # ══════════════════════════════════════════════════════════════
-#  v5.2 Enhancement Layer — مع تحسينات الإلغاء والخصوصية
+#  Enhancement Layer
 # ══════════════════════════════════════════════════════════════
 
-_BW_CACHE   = {}
-_BW_LOCK    = threading.Lock()
-
-_GEO_CACHE  = {}
-_GEO_LOCK   = threading.Lock()
-
-_SSL_CACHE  = {}
-_SSL_LOCK   = threading.Lock()
-
-# ── v5.9 FIX 6: token-bucket GeoIP rate limiter ──
-_GEO_BUCKET_LOCK  = threading.Lock()
-_GEO_BUCKET       = {"tokens": 45.0, "last": time.time()}
-_GEO_CAPACITY     = 45.0
-_GEO_REFILL_RATE  = 0.75  # tokens/sec
+_BW_CACHE = {}
+_BW_LOCK = threading.Lock()
+_GEO_CACHE = {}
+_GEO_LOCK = threading.Lock()
+_SSL_CACHE = {}
+_SSL_LOCK = threading.Lock()
+_GEO_BUCKET_LOCK = threading.Lock()
+_GEO_BUCKET = {"tokens": 45.0, "last": time.time()}
+_GEO_CAPACITY = 45.0
+_GEO_REFILL_RATE = 0.75
 
 def _geo_try_consume():
     with _GEO_BUCKET_LOCK:
@@ -878,9 +937,6 @@ def _extract_host_port(server_url):
         return host, port, scheme
     except Exception:
         return None, None, None
-
-# ── Feature 1: Stream Bandwidth Test ────────────────────────────
-#  v5.9.2 FIX: دعم cookies لقياس باندويث بوابات MAC بهوية الجلسة
 
 def _measure_bandwidth(url, cache_key, headers=None, cookies=None):
     with _BW_LOCK:
@@ -942,8 +998,6 @@ def _get_mac_bandwidth_url(session, portal_url, api_path, headers, cookies, cmds
             continue
     return None
 
-# ── Feature 2: Quality Score Calculator (0-100) ─────────────────
-
 def _compute_score(res):
     try:
         if not res.get("auth_valid"):
@@ -978,7 +1032,7 @@ def _compute_score(res):
             score += 3
         if mods.get("epg"):
             score += 4
-        exp      = res.get("exp_date")
+        exp = res.get("exp_date")
         sub_type = res.get("sub_type")
         if sub_type == "Paid":
             if exp == "Unlimited":
@@ -1007,29 +1061,23 @@ def _compute_score(res):
     except Exception:
         return 0
 
-# ── Feature 3: GeoIP Lookup (ip-api.com) ────────────────────────
-
 def _geoip_lookup(hostname):
     if not hostname:
         return None
-
     with _GEO_LOCK:
         cached = _GEO_CACHE.get(hostname)
     if cached is not None:
         return None if isinstance(cached, str) else cached
-
     try:
         ip = _resolve_host_bounded(hostname, timeout=5)
     except Exception:
         with _GEO_LOCK:
             _GEO_CACHE[hostname] = "NULL"
         return None
-
     if not _geo_try_consume():
         with _GEO_LOCK:
             _GEO_CACHE[hostname] = "RATE_LIMITED"
         return None
-
     result = None
     try:
         sess = _make_retry_session()
@@ -1049,12 +1097,9 @@ def _geoip_lookup(hostname):
                 }
     except Exception:
         result = None
-
     with _GEO_LOCK:
         _GEO_CACHE[hostname] = result if result is not None else "NULL"
     return result
-
-# ── Feature 4: SSL Certificate Check ────────────────────────────
 
 def _ssl_check(hostname, port=443):
     if not hostname:
@@ -1064,18 +1109,17 @@ def _ssl_check(hostname, port=443):
         cached = _SSL_CACHE.get(cache_key)
     if cached and (time.time() - cached["ts"] < 3600):
         return cached["data"]
-
     data = None
     try:
         ip = _resolve_host_bounded(hostname, timeout=5)
         ctx = ssl.create_default_context()
         with socket.create_connection((ip, port), timeout=5) as sock:
             with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
-                cert   = ssock.getpeercert() or {}
+                cert = ssock.getpeercert() or {}
                 cipher = ssock.cipher()
                 tls_version = ssock.version()
                 subject = dict(x[0] for x in cert.get("subject", []))
-                issuer  = dict(x[0] for x in cert.get("issuer", []))
+                issuer = dict(x[0] for x in cert.get("issuer", []))
                 not_after = cert.get("notAfter")
                 not_after_iso = None
                 if not_after:
@@ -1094,12 +1138,9 @@ def _ssl_check(hostname, port=443):
                 }
     except Exception as e:
         data = {"valid": False, "error": str(e)[:80]}
-
     with _SSL_LOCK:
         _SSL_CACHE[cache_key] = {"data": data, "ts": time.time()}
     return data
-
-# ── Feature 5: M3U Playlist Analysis ────────────────────────────
 
 def _analyze_m3u(url):
     try:
@@ -1110,7 +1151,6 @@ def _analyze_m3u(url):
         buf = ""
         partial = True
         start = time.perf_counter()
-
         with safe_request(sess, url, headers=HEADERS, timeout=timeout_s,
                           verify=False, stream=True) as r:
             if r.status_code >= 400:
@@ -1132,15 +1172,12 @@ def _analyze_m3u(url):
                     break
             else:
                 partial = False
-
         lines = buf.split("\n")
         extinf_lines = [l for l in lines if l.strip().upper().startswith("#EXTINF")]
         total_channels = len(extinf_lines)
-
-        groups   = set()
-        has_epg  = False
+        groups = set()
+        has_epg = False
         qualities = {"SD": 0, "HD": 0, "FHD": 0, "4K": 0, "Unknown": 0}
-
         for line in extinf_lines:
             m = re.search(r'group-title="([^"]*)"', line, re.IGNORECASE)
             if m and m.group(1):
@@ -1158,7 +1195,6 @@ def _analyze_m3u(url):
                 qualities["SD"] += 1
             else:
                 qualities["Unknown"] += 1
-
         return {
             "total_channels": total_channels,
             "groups_count": len(groups),
@@ -1169,17 +1205,12 @@ def _analyze_m3u(url):
     except Exception:
         return None
 
-# ══════════════════════════════════════════════════════════════
-#  v5.3 Rescue Chain — Xtream/M3U path only.
-#  تم تعديلها لإرجاع عدد القنوات أيضاً.
-# ══════════════════════════════════════════════════════════════
-
 def _rescue_try_getphp_m3u(session, base_url, username, password):
     try:
         url = (f"{base_url.rstrip('/')}/get.php"
                f"?username={username}&password={password}"
                f"&type=m3u_plus&output=ts")
-        max_bytes = 2 * 1024 * 1024  # زيادة لجلب قائمة أكبر
+        max_bytes = 2 * 1024 * 1024
         total = 0
         buf = ""
         with safe_request(session, url, headers=HEADERS, timeout=8, verify=False, stream=True) as r:
@@ -1198,7 +1229,6 @@ def _rescue_try_getphp_m3u(session, base_url, username, password):
         ok = ("#EXTM3U" in buf) and ("#EXTINF" in buf)
         if not ok:
             return False, None, 0
-        # حساب عدد القنوات
         total_channels = len([l for l in buf.split("\n") if l.strip().upper().startswith("#EXTINF")])
         first_url = None
         m = re.search(r'^#EXTINF[^\n]*\n\s*(https?://\S+)', buf, re.M)
@@ -1209,11 +1239,11 @@ def _rescue_try_getphp_m3u(session, base_url, username, password):
         return False, None, 0
 
 # ══════════════════════════════════════════════════════════════
-#  Bridge: MAC → M3U   (مع تحسينات الخصوصية والإلغاء)
+#  Bridge: MAC → M3U
 # ══════════════════════════════════════════════════════════════
 
-_BRIDGE_AUTH  = {}
-_BRIDGE_LIST  = {}
+_BRIDGE_AUTH = {}
+_BRIDGE_LIST = {}
 _BRIDGE_LINKS = {}
 
 def _bridge_auth(portal_url, mac_address, force=False):
@@ -1238,7 +1268,6 @@ def _bridge_auth(portal_url, mac_address, force=False):
                 discovered = _PATH_CACHE[portal_url]
             else:
                 discovered = discover_api_path(session, portal_url, mac_headers, cookies)
-                # لا نخزّن None أبداً
                 if discovered:
                     _PATH_CACHE[portal_url] = discovered
     except _LockBusy:
@@ -1334,22 +1363,22 @@ def bridge_playlist():
     if auth_error:
         return auth_error
     portal = request.args.get("portal", "").strip()
-    mac    = request.args.get("mac", "").strip()
-    mode   = request.args.get("mode", "live")
+    mac = request.args.get("mac", "").strip()
+    mode = request.args.get("mode", "live")
     if not portal or not mac:
         return "Missing portal/mac", 400
     entry = _bridge_channels(portal, mac)
     if not entry or not entry["channels"]:
         return "#EXTM3U\n", 200, {"Content-Type": "text/plain; charset=utf-8"}
-    base  = request.host_url.rstrip("/")
+    base = request.host_url.rstrip("/")
     lines = ["#EXTM3U"]
     for ch in entry["channels"]:
         if not isinstance(ch, dict):
             continue
-        name  = str(ch.get("name", "channel")).replace(",", " ")
-        gid   = str(ch.get("tv_genre_id", ""))
+        name = str(ch.get("name", "channel")).replace(",", " ")
+        gid = str(ch.get("tv_genre_id", ""))
         group = entry["genres"].get(gid, "")
-        logo  = str(ch.get("logo", ""))
+        logo = str(ch.get("logo", ""))
         ch_id = ch.get("id")
         if mode == "live":
             url = f"{base}/bridge/play?portal={quote(portal)}&mac={quote(mac)}&ch={ch_id}"
@@ -1371,9 +1400,9 @@ def bridge_play():
     if auth_error:
         return auth_error
     portal = request.args.get("portal", "").strip()
-    mac    = request.args.get("mac", "").strip()
-    ch     = request.args.get("ch", "").strip()
-    proxy  = request.args.get("proxy", "0") == "1"
+    mac = request.args.get("mac", "").strip()
+    ch = request.args.get("ch", "").strip()
+    proxy = request.args.get("proxy", "0") == "1"
     if not portal or not mac or not ch:
         return "Missing params", 400
     key = (normalize_portal_url(portal), mac, ch)
@@ -1383,7 +1412,7 @@ def bridge_play():
     if cached and now - cached[1] < 120:
         url = cached[0]
     else:
-        cmd   = None
+        cmd = None
         entry = _bridge_channels(portal, mac)
         if entry:
             for c in entry["channels"]:
@@ -1425,7 +1454,7 @@ def bridge_play():
     return redirect(url)
 
 # ══════════════════════════════════════════════════════════════
-#  دوال الإلغاء (الإصلاح 2)
+#  Cancellation helpers
 # ══════════════════════════════════════════════════════════════
 
 def is_cancelled(job_id):
@@ -1441,7 +1470,7 @@ def clear_cancel(job_id):
         _CANCEL_FLAG.pop(job_id, None)
 
 # ══════════════════════════════════════════════════════════════
-#  Core Checkers with UNIVERSAL EXCEPTION TRAP
+#  Core Checkers
 # ══════════════════════════════════════════════════════════════
 
 def test_single_server(server_url, username, password, m3u_analysis_enabled=False, job_id=None):
@@ -1475,7 +1504,6 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
             "failure_reason": ""
         }
 
-        # Pre-resolve DNS
         base_url = server_url
         _dns_host, _dns_port, _dns_scheme = _extract_host_port(base_url)
         if _dns_host:
@@ -1488,11 +1516,10 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
 
         api_url = f"{base_url.rstrip('/')}/player_api.php?username={username}&password={password}"
         session = requests.Session()
-        resp         = None
+        resp = None
         original_exc = None
-        start_t      = time.perf_counter()
+        start_t = time.perf_counter()
 
-        # ── Primary attempt ──
         try:
             if job_id and is_cancelled(job_id):
                 raise CancelException("Cancelled")
@@ -1518,7 +1545,6 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
                 res["failure_reason"] = "EXCEPTION"
                 return sanitize_result(res)
 
-        # ── RESCUE STEP 2 — Conditional Port Rotation ──
         if resp is None and original_exc is not None:
             try:
                 host, _op, _os = _extract_host_port(base_url)
@@ -1540,8 +1566,8 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
                             cand_resp = safe_request(session, cand_api, headers=HEADERS, timeout=4,
                                                      verify=False, allow_redirects=True)
                             base_url = cand_base
-                            api_url  = cand_api
-                            resp     = cand_resp
+                            api_url = cand_api
+                            resp = cand_resp
                             res["rescue_method"] = f"port:{cand_port}"
                             break
                         except Exception:
@@ -1556,7 +1582,6 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
 
         res["api_ms"] = round((time.perf_counter() - start_t) * 1000, 1)
 
-        # ── RESCUE STEP 1 — Alternate API Endpoint (panel_api.php) ──
         if original_exc is None and resp.status_code == 404:
             try:
                 alt_api = (f"{base_url.rstrip('/')}/panel_api.php"
@@ -1565,7 +1590,7 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
                                         verify=False, allow_redirects=True)
                 if alt_resp.status_code == 200:
                     api_url = alt_api
-                    resp    = alt_resp
+                    resp = alt_resp
                     res["rescue_method"] = "panel_api"
             except Exception:
                 pass
@@ -1586,12 +1611,12 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
                 status_val = user_info.get("status", "Active")
                 if res["rescue_method"]:
                     res["rescued"] = True
-                    res["status"]  = "Rescued"
+                    res["status"] = "Rescued"
                 else:
                     res["status"] = status_val
 
-                is_trial_flag  = user_info.get("is_trial", "0")
-                package_name   = str(user_info.get("package_name", "")).lower()
+                is_trial_flag = user_info.get("is_trial", "0")
+                package_name = str(user_info.get("package_name", "")).lower()
                 username_lower = username.lower()
 
                 detected_trial = False
@@ -1602,21 +1627,20 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
                 elif any(kw in username_lower for kw in ["trial", "test", "demo"]):
                     detected_trial = True
 
-                res["is_trial"]           = detected_trial
-                res["sub_type"]           = "Trial" if detected_trial else "Paid"
-                res["max_connections"]    = user_info.get("max_connections", "1")
+                res["is_trial"] = detected_trial
+                res["sub_type"] = "Trial" if detected_trial else "Paid"
+                res["max_connections"] = user_info.get("max_connections", "1")
                 res["active_connections"] = user_info.get(
                     "active_cons", user_info.get("active_connections", "0"))
-                res["exp_date"]           = format_timestamp(user_info.get("exp_date"))
+                res["exp_date"] = format_timestamp(user_info.get("exp_date"))
                 ca = user_info.get("created_at")
                 res["created_date"] = (format_timestamp(ca)
                                        if ca not in (None, "", "0") else "N/A")
             else:
-                # ── الإصلاح 10: تجربة get.php حتى لو كانت auth غير صالحة ──
                 res["error"] = "Auth Failed"
                 res["failure_reason"] = "AUTH_FAILED"
                 rescued_ok = False
-                first_url  = None
+                first_url = None
                 channels_count_rescue = 0
                 try:
                     if job_id and is_cancelled(job_id):
@@ -1625,17 +1649,17 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
                         session, base_url, username, password)
                 except Exception:
                     rescued_ok = False
-                    first_url  = None
+                    first_url = None
                 if rescued_ok:
-                    res["auth_valid"]      = True
-                    res["status"]          = "Rescued"
-                    res["rescued"]         = True
-                    res["rescue_method"]   = "get.php"
-                    res["is_online"]       = True
+                    res["auth_valid"] = True
+                    res["status"] = "Rescued"
+                    res["rescued"] = True
+                    res["rescue_method"] = "get.php"
+                    res["is_online"] = True
                     res["modules"]["live"] = True
-                    res["channels_count"]  = channels_count_rescue
-                    res["error"]           = ""
-                    res["failure_reason"]  = ""
+                    res["channels_count"] = channels_count_rescue
+                    res["error"] = ""
+                    res["failure_reason"] = ""
                     try:
                         if first_url:
                             sr = safe_request(session, first_url, headers=HEADERS,
@@ -1649,10 +1673,9 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
         else:
             res["error"] = f"HTTP {resp.status_code}"
             res["failure_reason"] = f"HTTP_{resp.status_code}"
-            # ── RESCUE STEP 3 — get.php M3U Fallback (تم توسيع الشرط ليشمل 401) ──
             if resp.status_code in (404, 403, 401):
                 rescued_ok = False
-                first_url  = None
+                first_url = None
                 channels_count_rescue = 0
                 try:
                     if job_id and is_cancelled(job_id):
@@ -1661,17 +1684,17 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
                         session, base_url, username, password)
                 except Exception:
                     rescued_ok = False
-                    first_url  = None
+                    first_url = None
                 if rescued_ok:
-                    res["auth_valid"]      = True
-                    res["status"]          = "Rescued"
-                    res["rescued"]         = True
-                    res["rescue_method"]   = "get.php"
-                    res["is_online"]       = True
+                    res["auth_valid"] = True
+                    res["status"] = "Rescued"
+                    res["rescued"] = True
+                    res["rescue_method"] = "get.php"
+                    res["is_online"] = True
                     res["modules"]["live"] = True
-                    res["channels_count"]  = channels_count_rescue
-                    res["error"]           = ""
-                    res["failure_reason"]  = ""
+                    res["channels_count"] = channels_count_rescue
+                    res["error"] = ""
+                    res["failure_reason"] = ""
                     try:
                         if first_url:
                             sr = safe_request(session, first_url, headers=HEADERS,
@@ -1685,7 +1708,6 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
             else:
                 return sanitize_result(res)
 
-        # ── Fetch channels and test stream ──
         ids = []
         try:
             if job_id and is_cancelled(job_id):
@@ -1710,7 +1732,6 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
         except Exception:
             pass
 
-        # ── Module detection ──
         try:
             if job_id and is_cancelled(job_id):
                 raise CancelException("Cancelled")
@@ -1723,7 +1744,6 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
         except Exception:
             pass
 
-        # ── VOD / Series counters ──
         try:
             if res["modules"].get("vod"):
                 res["vod_count"] = _fetch_xtream_vod_count(session, api_url, job_id)
@@ -1739,7 +1759,6 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
         except Exception:
             res["series_count"] = 0
 
-        # ── v5.2 Enhancement Layer ──
         if res["auth_valid"]:
             host, port, scheme = None, None, None
             try:
@@ -1747,7 +1766,6 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
             except Exception:
                 pass
 
-            # Bandwidth (cache key يشمل اليوزر لمنع الخلط)
             try:
                 if res["stream_ok"] is True and ids:
                     cache_key = (host or base_url, username, "xtream")
@@ -1756,13 +1774,11 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
             except Exception:
                 res["bandwidth_kbps"] = 0.0
 
-            # GeoIP
             try:
                 res["geo"] = _geoip_lookup(host)
             except Exception:
                 res["geo"] = None
 
-            # SSL
             try:
                 if scheme == "https" or port == 443:
                     res["ssl_info"] = _ssl_check(host, port or 443)
@@ -1771,7 +1787,6 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
             except Exception:
                 res["ssl_info"] = None
 
-            # M3U analysis
             try:
                 if m3u_analysis_enabled:
                     m3u_link = f"{base_url.rstrip('/')}/get.php?username={username}&password={password}&type=m3u_plus&output=ts"
@@ -1780,7 +1795,6 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
             except Exception:
                 res["m3u_analysis"] = None
 
-            # Score
             try:
                 res["score"] = _compute_score(res)
             except Exception:
@@ -1790,68 +1804,31 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
 
     except CancelException:
         return sanitize_result({
-            "server": server_url,
-            "username": username,
-            "password": password,
-            "auth_valid": False,
-            "error": "CANCELLED",
-            "failure_reason": "CANCELLED",
-            "is_online": False,
-            "status": "Cancelled",
-            "api_ms": 0,
+            "server": server_url, "username": username, "password": password,
+            "auth_valid": False, "error": "CANCELLED", "failure_reason": "CANCELLED",
+            "is_online": False, "status": "Cancelled", "api_ms": 0,
             "modules": {"live": False, "vod": False, "series": False, "epg": False},
-            "diag": "",
-            "rescued": False,
-            "rescue_method": "",
-            "bandwidth_kbps": 0.0,
-            "score": 0,
-            "geo": None,
-            "ssl_info": None,
-            "m3u_analysis": None,
-            "vod_count": 0,
-            "series_count": 0,
-            "channels_count": 0,
-            "exp_date": "N/A",
-            "created_date": "N/A",
-            "max_connections": "1",
-            "active_connections": "0",
-            "m3u_url": "",
-            "stream_ok": None,
-            "api_path": ""
+            "diag": "", "rescued": False, "rescue_method": "",
+            "bandwidth_kbps": 0.0, "score": 0, "geo": None, "ssl_info": None,
+            "m3u_analysis": None, "vod_count": 0, "series_count": 0,
+            "channels_count": 0, "exp_date": "N/A", "created_date": "N/A",
+            "max_connections": "1", "active_connections": "0",
+            "m3u_url": "", "stream_ok": None, "api_path": ""
         })
 
     except Exception as outer_exc:
         return sanitize_result({
-            "server": server_url,
-            "username": username,
-            "password": password,
-            "auth_valid": False,
-            "is_trial": False,
-            "sub_type": "Paid",
-            "error": f"CRITICAL: {str(outer_exc)[:200]}",
-            "failure_reason": "CRITICAL",
-            "is_online": False,
-            "status": "Error",
-            "api_ms": 9999.0,
+            "server": server_url, "username": username, "password": password,
+            "auth_valid": False, "is_trial": False, "sub_type": "Paid",
+            "error": f"CRITICAL: {str(outer_exc)[:200]}", "failure_reason": "CRITICAL",
+            "is_online": False, "status": "Error", "api_ms": 9999.0,
             "modules": {"live": False, "vod": False, "series": False, "epg": False},
-            "diag": "",
-            "rescued": False,
-            "rescue_method": "",
-            "bandwidth_kbps": 0.0,
-            "score": 0,
-            "geo": None,
-            "ssl_info": None,
-            "m3u_analysis": None,
-            "vod_count": 0,
-            "series_count": 0,
-            "channels_count": 0,
-            "exp_date": "N/A",
-            "created_date": "N/A",
-            "max_connections": "1",
-            "active_connections": "0",
-            "m3u_url": "",
-            "stream_ok": None,
-            "api_path": ""
+            "diag": "", "rescued": False, "rescue_method": "",
+            "bandwidth_kbps": 0.0, "score": 0, "geo": None, "ssl_info": None,
+            "m3u_analysis": None, "vod_count": 0, "series_count": 0,
+            "channels_count": 0, "exp_date": "N/A", "created_date": "N/A",
+            "max_connections": "1", "active_connections": "0",
+            "m3u_url": "", "stream_ok": None, "api_path": ""
         })
 
 def test_mac_portal(portal_url, mac_address, job_id=None):
@@ -1883,7 +1860,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
             "failure_reason": ""
         }
 
-        # Pre-resolve DNS
         _mac_host, _mac_port, _mac_scheme = _extract_host_port(portal_url)
         if _mac_host:
             try:
@@ -1904,14 +1880,12 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
         cookies = {"mac": mac_address, "stb_lang": "en", "timezone": "Europe/Amsterdam"}
         session = requests.Session()
 
-        # Discovery lock with bounded guard
         try:
             with _BoundedGuard(_get_disc_lock(portal_url), timeout=_DISC_LOCK_TIMEOUT):
                 if portal_url in _PATH_CACHE:
                     discovered = _PATH_CACHE[portal_url]
                 else:
                     discovered = discover_api_path(session, portal_url, mac_headers, cookies)
-                    # لا نخزّن None أبداً
                     if discovered:
                         if len(_PATH_CACHE) > 200:
                             _PATH_CACHE.clear()
@@ -1921,7 +1895,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
         paths = [discovered] + PORTAL_API_PATHS if discovered else list(PORTAL_API_PATHS)
 
         def _try_handshake(base_url, path_list):
-            last   = None
+            last = None
             consec = 0
             for path in path_list:
                 for _ in range(2):
@@ -1950,7 +1924,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     break
             return None, None, last
 
-        # ── الإصلاح 5: معالجة _LockBusy في semaphore ──
         try:
             with _BoundedGuard(_get_portal_sem(portal_url), timeout=_PORTAL_SEM_TIMEOUT):
                 start_t = time.perf_counter()
@@ -1964,7 +1937,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     if hs_resp is not None:
                         portal_url = alt
                         res["server"] = alt
-                        last_status  = ls2
+                        last_status = ls2
 
                 res["api_ms"] = round((time.perf_counter() - start_t) * 1000, 1)
                 if hs_resp is None:
@@ -1973,7 +1946,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     return sanitize_result(res)
 
                 res["is_online"] = True
-                res["api_path"]  = api_path
+                res["api_path"] = api_path
 
                 token = ""
                 try:
@@ -1991,7 +1964,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 auth_headers = dict(mac_headers)
                 auth_headers["Authorization"] = f"Bearer {token}"
 
-                # توليد SN وUID فريدين من عنوان MAC
                 sn, uid = _get_mag_sn_uid(mac_address)
 
                 mag_params = {
@@ -2042,7 +2014,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 if profile_ok and pr is not None:
                     try:
                         prof = (pr.json() or {}).get("js", {}) or {}
-                        # فحص الحظر المحتمل في استجابة profile
                         if _looks_blocked(prof):
                             res["status"] = "Blocked"
                             res["error"] = "STB Blocked (provider)"
@@ -2060,7 +2031,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     return sanitize_result(res)
 
                 res["auth_valid"] = True
-                res["status"]     = "Active MAC"
+                res["status"] = "Active MAC"
                 res["modules"]["live"] = True
                 diag = []
 
@@ -2133,7 +2104,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 except Exception:
                     diag.append("main:ERR")
 
-                # فحص الحظر في البيانات المجمعة
                 if _looks_blocked({"p": prof, "a": acc, "s": sub, "m": main}):
                     res["status"] = "Blocked"
                     res["error"] = "STB Blocked (provider)"
@@ -2141,7 +2111,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     res["auth_valid"] = False
                     return sanitize_result(res)
 
-                # ── استخراج عدد الاتصالات (جديد) ──
                 conn_keys_max = ["max_connections", "max_cons", "max_users",
                                  "max_clients", "connection_limit", "allowed_connections",
                                  "max_conn"]
@@ -2171,15 +2140,15 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     res["active_connections"] = active_conn
 
                 plan_name = str(
-                    _pick(sub,  ["tariff_plan_name", "plan_name", "tariff_name", "name"])
+                    _pick(sub, ["tariff_plan_name", "plan_name", "tariff_name", "name"])
                     or _pick(main, ["tariff_plan_name", "tariff_name", "plan_name"])
-                    or _pick(acc,  ["tariff_plan_name", "plan_name", "tariff_name"])
+                    or _pick(acc, ["tariff_plan_name", "plan_name", "tariff_name"])
                     or ""
                 )
 
                 exp = (_pick_date(sub, date_keys)
                        or _pick_date(main, date_keys)
-                       or _pick_date(acc,  date_keys))
+                       or _pick_date(acc, date_keys))
                 if not exp:
                     exp = (_scan_date_in_values(sub)
                            or _scan_date_in_values(main)
@@ -2187,7 +2156,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 if exp:
                     res["exp_date"] = exp
 
-                # ── محاولات إضافية لاستخراج بيانات الاشتراك (جديد) ──
                 def _safe_get_json(params, tag):
                     try:
                         if job_id and is_cancelled(job_id):
@@ -2209,7 +2177,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                         diag.append(f"{tag}:ERR")
                         return {}
 
-                # استخراج sub_id / account_id لاستخدامها في الطلبات الإضافية
                 sub_id = _pick(sub, ["sub_id", "subscription_id", "id"])
                 if not sub_id:
                     sub_id = _pick(main, ["sub_id", "subscription_id", "id"])
@@ -2242,27 +2209,23 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 extra_user = _safe_get_json(extra_user_params, "extra_user")
                 extra_acc = _safe_get_json(extra_acc_params, "extra_acc")
 
-                # دمج البيانات الإضافية
                 extra_data = {}
                 for d in [extra_sub, extra_user, extra_acc]:
                     if isinstance(d, dict):
                         extra_data.update(d)
 
-                # تحديث تاريخ الانتهاء إذا وجد في البيانات الإضافية
                 exp_extra = (_pick_date(extra_data, date_keys)
                              or _scan_date_in_values(extra_data))
                 if exp_extra:
                     res["exp_date"] = exp_extra
                     exp = exp_extra
 
-                # تحديث تاريخ الإنشاء إذا لم يكن موجوداً
                 if not created:
                     created_extra = _pick_date(extra_data, created_keys)
                     if created_extra:
                         res["created_date"] = created_extra
                         created = created_extra
 
-                # تحديث عدد الأجهزة إذا وجد
                 max_conn_extra = _extract_first([extra_data], conn_keys_max)
                 active_conn_extra = _extract_first([extra_data], conn_keys_active)
                 if max_conn_extra:
@@ -2288,15 +2251,13 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     if keys:
                         res["diag"] += " | keys:" + ",".join(dict.fromkeys(keys))[:140]
 
-                # ── الآن نخرج من القفل لمواصلة العمليات البطيئة ──
-            # نهاية with semaphore
+            # نهاية مع semaphore
 
         except _LockBusy:
             res["error"] = "Portal busy (semaphore timeout)"
             res["failure_reason"] = "PORTAL_BUSY"
             return sanitize_result(res)
 
-        # ── بعد الخروج من القفل، نستكمل العمليات البطيئة ──
         first_ch_id = None
         cmds = []
         try:
@@ -2316,7 +2277,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 elif isinstance(cj, list):
                     res["channels_count"] = len(cj)
                     data_list = cj
-                # v5.9.2 FIX: عينة موزّعة على كامل القائمة بدل أول 20 قناة فقط
                 sample = []
                 if data_list:
                     step = max(1, len(data_list) // 15)
@@ -2337,9 +2297,8 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     stream_result = _check_mac_stream(
                         session, portal_url, api_path,
                         auth_headers, cookies, cmds, job_id, diag=stream_diag)
-                    # لا نعتبر transcoder_detected نجاحاً
                     if stream_result == "transcoder_detected":
-                        res["stream_ok"] = None  # غير مؤكد
+                        res["stream_ok"] = None
                         res["rescue_method"] = (res.get("rescue_method", "") + " transcoder_detected").strip()
                     else:
                         res["stream_ok"] = stream_result
@@ -2350,7 +2309,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
         except Exception:
             pass
 
-        # Module detection
         try:
             if job_id and is_cancelled(job_id):
                 raise CancelException("Cancelled")
@@ -2363,7 +2321,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
         except Exception:
             pass
 
-        # VOD / Series counters
         try:
             if res["modules"].get("vod"):
                 res["vod_count"] = _fetch_mac_vod_count(
@@ -2381,7 +2338,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
         except Exception:
             res["series_count"] = 0
 
-        # Enhancement Layer
         if res["auth_valid"]:
             host, port, scheme = None, None, None
             try:
@@ -2389,8 +2345,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
             except Exception:
                 pass
 
-            # Bandwidth — v5.9.2 FIX: بهوية جلسة الـ STB الكاملة
-            # cache key يشمل الماك لمنع الخلط
             try:
                 if res["stream_ok"] is True and cmds:
                     bw_url = _get_mac_bandwidth_url(session, portal_url, api_path,
@@ -2404,13 +2358,11 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
             except Exception:
                 res["bandwidth_kbps"] = 0.0
 
-            # GeoIP
             try:
                 res["geo"] = _geoip_lookup(host)
             except Exception:
                 res["geo"] = None
 
-            # SSL
             try:
                 if scheme == "https" or port == 443:
                     res["ssl_info"] = _ssl_check(host, port or 443)
@@ -2419,10 +2371,8 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
             except Exception:
                 res["ssl_info"] = None
 
-            # M3U analysis not applicable for MAC
             res["m3u_analysis"] = None
 
-            # Score
             try:
                 res["score"] = _compute_score(res)
             except Exception:
@@ -2527,23 +2477,22 @@ def check_servers():
         return auth_error
     _cleanup_old_jobs()
     _cleanup_caches()
-    data        = request.json
-    scan_type   = data.get("type", "xtream")
+    data = request.json
+    scan_type = data.get("type", "xtream")
     servers_raw = data.get("servers", "")
-    creds_raw   = data.get("creds", "")
-    m3u_raw     = data.get("m3u", "")
-    mac_portal  = data.get("macPortal", "")
-    mac_list    = data.get("macs", "")
+    creds_raw = data.get("creds", "")
+    m3u_raw = data.get("m3u", "")
+    mac_portal = data.get("macPortal", "")
+    mac_list = data.get("macs", "")
     m3u_analysis_enabled = bool(data.get("m3u_analysis_enabled", False))
 
     tasks = []
 
-    # ── تحديد القوائم مع تطبيق حدود الإدخال ──
     if scan_type == "xtream":
         servers_list = list(dict.fromkeys(
             s.strip().lstrip('/') for s in servers_raw.split("\n") if s.strip()
         ))[:MAX_INPUT_LINES]
-        creds_lines  = list(dict.fromkeys(
+        creds_lines = list(dict.fromkeys(
             c.strip() for c in creds_raw.split("\n") if ":" in c
         ))[:MAX_INPUT_LINES]
         for s in servers_list:
@@ -2563,14 +2512,13 @@ def check_servers():
         portals = list(dict.fromkeys(
             normalize_portal_url(p) for p in mac_portal.split("\n") if p.strip()
         ))[:MAX_INPUT_LINES]
-        macs    = list(dict.fromkeys(
+        macs = list(dict.fromkeys(
             m.strip() for m in mac_list.split("\n") if m.strip()
         ))[:MAX_INPUT_LINES]
         for portal in portals:
             for mac in macs:
                 tasks.append(("mac", portal, mac, ""))
 
-    # ── تطبيق حد المهام ──
     if len(tasks) > MAX_TASKS:
         tasks = tasks[:MAX_TASKS]
 
@@ -2578,7 +2526,7 @@ def check_servers():
         return jsonify({"error": "الرجاء إدخال بيانات صحيحة."})
 
     job_id = str(uuid.uuid4())[:8]
-    q      = queuelib.Queue()
+    q = queuelib.Queue()
 
     with _JOBS_LOCK:
         _JOBS[job_id] = {"q": q, "total": len(tasks), "done": 0, "ts": time.time()}
