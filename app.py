@@ -1,8 +1,9 @@
 # ══════════════════════════════════════════════════════════════
-#  IPTV Pro Inspector — v5.9.2-patched (PWA + Stability)
+#  IPTV Pro Inspector — v5.9.2-patched (PWA + Stability + Streaming JSON)
 #  (جميع الإصلاحات + دعم عدد الاتصالات + إصلاح ffmpeg + تمييز الرفض
 #   + محاولات إضافية لاستخراج تاريخ الانتهاء وعدد الأجهزة
-#   + دعم PWA كامل + تحسينات الذاكرة والاستقرار)
+#   + دعم PWA كامل + تحسينات الذاكرة والاستقرار
+#   + استخدام ijson للقراءة التدفقية للاستجابات الضخمة)
 # ══════════════════════════════════════════════════════════════
 from flask import Flask, render_template, request, jsonify, redirect, Response, stream_with_context
 import time, requests, urllib3, threading, re, json, random, uuid, socket, ssl, ipaddress, os
@@ -11,6 +12,7 @@ import hashlib
 import struct
 import zlib
 import gc
+import ijson
 from datetime import datetime, timezone
 from urllib.parse import urlparse, quote, urlunparse, urljoin, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -98,20 +100,17 @@ self.addEventListener('activate', event => {
 
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
-  // لا نتدخل في EventSource أو طلبات الفحص
   if (event.request.url.includes('/stream/') ||
       event.request.url.includes('/check') ||
       event.request.url.includes('/cancel/')) {
     return;
   }
-  // استراتيجية Cache-First للأصول الثابتة
   if (ASSETS.includes(new URL(event.request.url).pathname)) {
     event.respondWith(
       caches.match(event.request).then(cached => cached || fetch(event.request))
     );
     return;
   }
-  // Network-First مع fallback للواجهة الرئيسية
   event.respondWith(
     fetch(event.request)
       .then(res => {
@@ -313,7 +312,7 @@ def _get_disc_lock(portal_url):
 # ══════════════════════════════════════════════════════════════
 
 def _cleanup_old_jobs():
-    cutoff = time.time() - 600
+    cutoff = time.time() - 120
     with _JOBS_LOCK:
         stale = [jid for jid, j in _JOBS.items() if j.get("ts", 0) < cutoff]
         for jid in stale:
@@ -821,36 +820,48 @@ def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_c
     return modules
 
 # ══════════════════════════════════════════════════════════════
-#  VOD / Series counters (خفيفة)
+#  VOD / Series counters (خفيفة وتدفقية)
 # ══════════════════════════════════════════════════════════════
 
 def _fetch_xtream_vod_count(session, api_url, job_id=None):
     if job_id and is_cancelled(job_id):
         raise CancelException("Cancelled")
     try:
-        r = safe_request(session, f"{api_url}&action=get_vod_streams",
-                         headers=HEADERS, timeout=8, verify=False)
-        if r.status_code == 200:
-            j = r.json()
-            if isinstance(j, list):
-                return len(j)
+        url = f"{api_url}&action=get_vod_streams"
+        with safe_request(session, url, headers=HEADERS, timeout=8, verify=False, stream=True) as r:
+            if r.status_code == 200:
+                r.raw.decode_content = True
+                count = 0
+                for prefix, event, value in ijson.parse(r.raw):
+                    if event == 'start_array' and prefix == '':
+                        pass
+                    elif prefix == 'item' and event == 'string':
+                        count += 1
+                return count
+    except CancelException:
+        raise
     except Exception:
-        pass
-    return 0
+        return 0
 
 def _fetch_xtream_series_count(session, api_url, job_id=None):
     if job_id and is_cancelled(job_id):
         raise CancelException("Cancelled")
     try:
-        r = safe_request(session, f"{api_url}&action=get_series",
-                         headers=HEADERS, timeout=8, verify=False)
-        if r.status_code == 200:
-            j = r.json()
-            if isinstance(j, list):
-                return len(j)
+        url = f"{api_url}&action=get_series"
+        with safe_request(session, url, headers=HEADERS, timeout=8, verify=False, stream=True) as r:
+            if r.status_code == 200:
+                r.raw.decode_content = True
+                count = 0
+                for prefix, event, value in ijson.parse(r.raw):
+                    if event == 'start_array' and prefix == '':
+                        pass
+                    elif prefix == 'item' and event == 'string':
+                        count += 1
+                return count
+    except CancelException:
+        raise
     except Exception:
-        pass
-    return 0
+        return 0
 
 def _fetch_mac_count_light(session, portal_url, api_path, headers, cookies, media_type, job_id=None):
     """
@@ -859,30 +870,29 @@ def _fetch_mac_count_light(session, portal_url, api_path, headers, cookies, medi
     if job_id and is_cancelled(job_id):
         raise CancelException("Cancelled")
     try:
-        r = safe_request(session, f"{portal_url}{api_path}",
-                         params={"type": media_type, "action": "get_ordered_list",
-                                 "p": "1", "JsHttpRequest": "1-xml"},
-                         headers=headers, cookies=cookies, timeout=8, verify=False)
-        if r.status_code == 200:
-            js = (r.json() or {}).get("js", {}) or {}
-            if isinstance(js, dict):
-                # نقرأ total_items فقط، مع تجاهل data
-                total = js.get("total_items")
-                if total is not None:
-                    try:
-                        return int(total)
-                    except (ValueError, TypeError):
-                        pass
-                # fallback: عدّ القائمة إذا كانت صغيرة
-                data = js.get("data", [])
-                return len(data) if isinstance(data, list) else 0
-            elif isinstance(js, list):
-                return len(js)
+        url = f"{portal_url}{api_path}"
+        params = {"type": media_type, "action": "get_ordered_list",
+                  "p": "1", "JsHttpRequest": "1-xml"}
+        with safe_request(session, url, params=params, headers=headers, cookies=cookies,
+                          timeout=8, verify=False, stream=True) as r:
+            if r.status_code != 200:
+                return 0
+            r.raw.decode_content = True
+            total = None
+            for prefix, event, value in ijson.parse(r.raw):
+                if prefix == 'js.total_items' and event == 'number':
+                    total = int(value)
+                    break
+                if prefix.startswith('js.data') and event == 'start_array':
+                    # إذا لم نجد total_items، نتوقف فوراً ونتجاهل
+                    break
+            if total is not None:
+                return total
+            return 0
     except CancelException:
         raise
     except Exception:
-        pass
-    return 0
+        return 0
 
 # ══════════════════════════════════════════════════════════════
 #  Enhancement Layer
@@ -1236,7 +1246,7 @@ def _rescue_try_getphp_m3u(session, base_url, username, password):
         return False, None, 0
 
 # ══════════════════════════════════════════════════════════════
-#  Bridge: MAC → M3U
+#  Bridge: MAC → M3U (يترك r.json() كما هو لأن البيانات تستخدم كاملة)
 # ══════════════════════════════════════════════════════════════
 
 _BRIDGE_AUTH = {}
@@ -1709,18 +1719,21 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
         try:
             if job_id and is_cancelled(job_id):
                 raise CancelException("Cancelled")
-            ch_resp = safe_request(session, f"{api_url}&action=get_live_streams",
-                                   headers=HEADERS, timeout=10, verify=False)
-            if ch_resp.status_code == 200:
-                channels = ch_resp.json()
-                if isinstance(channels, list):
-                    res["channels_count"] = len(channels)
-                    for ch in channels[:15]:
-                        if isinstance(ch, dict) and ch.get("stream_id") \
-                                and ch["stream_id"] not in ids:
-                            ids.append(ch["stream_id"])
+            url = f"{api_url}&action=get_live_streams"
+            with safe_request(session, url, headers=HEADERS, timeout=10, verify=False, stream=True) as ch_resp:
+                if ch_resp.status_code == 200:
+                    ch_resp.raw.decode_content = True
+                    total = 0
+                    for item in ijson.items(ch_resp.raw, 'item'):
+                        total += 1
+                        if isinstance(item, dict):
+                            sid = item.get("stream_id")
+                            if sid and sid not in ids:
+                                ids.append(sid)
                         if len(ids) >= 10:
-                            break
+                            # نواصل العد فقط دون تخزين
+                            pass
+                    res["channels_count"] = total
                     if ids:
                         res["stream_ok"] = _check_xtream_stream(
                             session, base_url, username, password, ids, job_id)
@@ -2153,7 +2166,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 if exp:
                     res["exp_date"] = exp
 
-                # ── محاولات إضافية خفيفة ──
                 def _safe_get_json(params, tag):
                     try:
                         if job_id and is_cancelled(job_id):
@@ -2256,66 +2268,64 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
             res["failure_reason"] = "PORTAL_BUSY"
             return sanitize_result(res)
 
-        # ── بعد الخروج من القفل، نستكمل العمليات البطيئة ──
         first_ch_id = None
         cmds = []
         try:
             if job_id and is_cancelled(job_id):
                 raise CancelException("Cancelled")
-            cr = safe_request(session, f"{portal_url}{api_path}",
-                              params={"type": "itv", "action": "get_all_channels"},
-                              headers=auth_headers, cookies=cookies,
-                              timeout=10, verify=False)
-            if cr.status_code == 200:
-                cj = (cr.json() or {}).get("js", {}) or {}
-                data_list = []
-                if isinstance(cj, dict):
-                    res["channels_count"] = int(
-                        cj.get("total_items") or len(cj.get("data", [])) or 0)
-                    data_list = cj.get("data", []) or []
-                elif isinstance(cj, list):
-                    res["channels_count"] = len(cj)
-                    data_list = cj
-
-                # أخذ عينة موزعة بأقل استهلاك ممكن
-                sample = []
-                if data_list:
-                    step = max(1, len(data_list) // 15)
-                    i = 0
-                    while i < len(data_list) and len(sample) < 20:
-                        sample.append(data_list[i])
-                        i += step
-                # تحرير البيانات الضخمة فورًا
-                del data_list
-                del cj
-                gc.collect()
-
-                for ch in sample:
-                    if isinstance(ch, dict) and first_ch_id is None and ch.get("id"):
-                        first_ch_id = ch.get("id")
-                    c = isinstance(ch, dict) and ch.get("cmd") or None
-                    if c and ("http" in str(c) or str(c).startswith("ffrt")) and c not in cmds:
-                        cmds.append(str(c))
-                    if len(cmds) >= 10:
-                        break
-                if cmds:
-                    stream_diag = []
-                    stream_result = _check_mac_stream(
-                        session, portal_url, api_path,
-                        auth_headers, cookies, cmds, job_id, diag=stream_diag)
-                    if stream_result == "transcoder_detected":
-                        res["stream_ok"] = None
-                        res["rescue_method"] = (res.get("rescue_method", "") + " transcoder_detected").strip()
+            url = f"{portal_url}{api_path}"
+            params = {"type": "itv", "action": "get_all_channels", "JsHttpRequest": "1-xml"}
+            with safe_request(session, url, params=params, headers=auth_headers,
+                              cookies=cookies, timeout=10, verify=False, stream=True) as cr:
+                if cr.status_code == 200:
+                    cr.raw.decode_content = True
+                    # استخدام ijson لاستخراج total_items وعينة فقط
+                    total_items = None
+                    sample = []
+                    data_item = {}
+                    for prefix, event, value in ijson.parse(cr.raw):
+                        if prefix == 'js.total_items' and event == 'number':
+                            total_items = int(value)
+                        elif prefix.startswith('js.data.item'):
+                            if event == 'start_map':
+                                data_item = {}
+                            elif event in ('string', 'number', 'boolean') and prefix.startswith('js.data.item.'):
+                                key = prefix.rsplit('.', 1)[-1]
+                                data_item[key] = value
+                            elif event == 'end_map':
+                                sample.append(data_item)
+                                if first_ch_id is None and 'id' in data_item:
+                                    first_ch_id = data_item['id']
+                        if total_items is not None and len(sample) >= 20:
+                            break
+                    if total_items is not None:
+                        res["channels_count"] = total_items
                     else:
-                        res["stream_ok"] = stream_result
-                    if stream_diag:
-                        res["diag"] = (res["diag"] + " | stream: " + ",".join(stream_diag))[:500]
+                        res["channels_count"] = len(sample) if sample else 0
+
+                    for ch in sample:
+                        c = ch.get('cmd')
+                        if c and ("http" in str(c) or str(c).startswith("ffrt")):
+                            cmds.append(str(c))
+                        if len(cmds) >= 10:
+                            break
+                    if cmds:
+                        stream_diag = []
+                        stream_result = _check_mac_stream(
+                            session, portal_url, api_path,
+                            auth_headers, cookies, cmds, job_id, diag=stream_diag)
+                        if stream_result == "transcoder_detected":
+                            res["stream_ok"] = None
+                            res["rescue_method"] = (res.get("rescue_method", "") + " transcoder_detected").strip()
+                        else:
+                            res["stream_ok"] = stream_result
+                        if stream_diag:
+                            res["diag"] = (res["diag"] + " | stream: " + ",".join(stream_diag))[:500]
         except CancelException:
             raise
         except Exception:
             pass
 
-        # Module detection
         try:
             if job_id and is_cancelled(job_id):
                 raise CancelException("Cancelled")
@@ -2328,7 +2338,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
         except Exception:
             pass
 
-        # VOD / Series counters (خفيفة)
         try:
             if res["modules"].get("vod"):
                 res["vod_count"] = _fetch_mac_count_light(
@@ -2348,7 +2357,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
         except Exception:
             res["series_count"] = 0
 
-        # Enhancement Layer
         if res["auth_valid"]:
             host, port, scheme = None, None, None
             try:
@@ -2388,12 +2396,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 res["score"] = _compute_score(res)
             except Exception:
                 res["score"] = 0
-
-        # تحرير نهائي
-        del auth_headers
-        del cookies
-        del session
-        gc.collect()
 
         return sanitize_result(res)
 
@@ -2556,7 +2558,6 @@ def check_servers():
                 return test_mac_portal(a, b, job_id)
             fn_map = {"xtream": _run_xtream, "mac": _run_mac}
 
-            # تحديد عدد العمال حسب نوع الفحص
             max_workers = 20
             if scan_type == "mac":
                 max_workers = 5
@@ -2578,9 +2579,7 @@ def check_servers():
                             if job_id in _JOBS:
                                 _JOBS[job_id]["done"] += 1
                         q.put(result)
-                        # تحرير الذاكرة بعد كل نتيجة
-                        if scan_type == "mac":
-                            gc.collect()
+                        gc.collect()
                     except Exception as e:
                         q.put({
                             "error": f"Worker future error: {str(e)[:100]}",
@@ -2588,6 +2587,8 @@ def check_servers():
                             "username": "unknown",
                             "failure_reason": "FUTURE_ERROR"
                         })
+                fmap.clear()
+                gc.collect()
         except Exception as worker_exc:
             q.put({"error": f"Worker crash: {str(worker_exc)[:100]}", "failure_reason": "WORKER_CRASH"})
         finally:
@@ -2634,6 +2635,7 @@ def stream_results(job_id):
                 yield f'data: {json.dumps({"__done__": True})}\n\n'
                 with _JOBS_LOCK:
                     _JOBS.pop(job_id, None)
+                gc.collect()
                 break
             try:
                 yield f"data: {json.dumps(item, default=json_serial)}\n\n"
