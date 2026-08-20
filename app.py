@@ -1,6 +1,7 @@
 # ══════════════════════════════════════════════════════════════
 #  IPTV Pro Inspector — v5.9.2-patched (PWA + Stability + Streaming JSON)
-#  (جميع الإصلاحات + استخراج تدفقي للبيانات + إصلاح الذاكرة + heartbeat)
+#  (جميع الإصلاحات + استخراج تدفقي للبيانات + إصلاح الذاكرة + heartbeat
+#   + طباعة تفصيلية للاستثناءات)
 # ══════════════════════════════════════════════════════════════
 from flask import Flask, render_template, request, jsonify, redirect, Response, stream_with_context
 import time, requests, urllib3, threading, re, json, random, uuid, socket, ssl, ipaddress, os
@@ -11,6 +12,7 @@ import zlib
 import gc
 import ijson
 import resource
+import traceback
 from datetime import datetime, timezone
 from urllib.parse import urlparse, quote, urlunparse, urljoin, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -812,7 +814,6 @@ def _detect_xtream_modules(session, api_url, first_stream_id=None, job_id=None):
             r = safe_request(session, f"{api_url}&action=get_short_epg&stream_id={first_stream_id}",
                              headers=HEADERS, timeout=5, verify=False)
             if r.status_code == 200:
-                # EPG قد تكون صغيرة، نقرأها عادي
                 j = r.json()
                 epg_list = j.get("epg_listings") if isinstance(j, dict) else None
                 if isinstance(epg_list, list) and len(epg_list) > 0:
@@ -824,7 +825,6 @@ def _detect_xtream_modules(session, api_url, first_stream_id=None, job_id=None):
 
 def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_ch_id=None, job_id=None):
     modules = {"live": True, "vod": False, "series": False, "epg": False}
-    # VOD categories - قراءة أول عنصر فقط
     try:
         if job_id and is_cancelled(job_id):
             raise CancelException("Cancelled")
@@ -842,7 +842,6 @@ def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_c
         r.close()
     except Exception:
         pass
-    # Series categories
     try:
         if job_id and is_cancelled(job_id):
             raise CancelException("Cancelled")
@@ -860,7 +859,6 @@ def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_c
         r.close()
     except Exception:
         pass
-    # EPG info small
     if first_ch_id:
         try:
             if job_id and is_cancelled(job_id):
@@ -1911,6 +1909,8 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
         })
 
     except Exception as outer_exc:
+        print("[SINGLE EXCEPTION]", repr(outer_exc))
+        traceback.print_exc()
         return sanitize_result({
             "server": server_url, "username": username, "password": password,
             "auth_valid": False, "is_trial": False, "sub_type": "Paid",
@@ -2054,10 +2054,8 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 res["api_path"] = api_path
                 _log_memory("after-handshake")
 
-                # استخراج token فقط من handshake
                 token = ""
                 try:
-                    # handshake response صغيرة، نقرأها عادي
                     j = hs_resp.json()
                     if isinstance(j, dict):
                         token = ((j.get("js") or {}).get("token", "")
@@ -2095,7 +2093,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     "timestamp": str(int(time.time())), "api_signature": "262",
                 }
 
-                # استخدام استخراج تدفقي للـ profile
                 profile_fields = {
                     'token': ['js.token'],
                     'exp_date': ['js.exp_date', 'js.expire_date', 'js.expiration_date', 'js.end_date',
@@ -2131,13 +2128,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 pr.close()
                 _log_memory("after-profile")
 
-                # نعتبر المصادقة صحيحة إذا نجح get_profile
-                res["auth_valid"] = True
-                res["status"] = "Active MAC"
-                res["modules"]["live"] = True
-                diag = []
-
-                # account_info/get_profile
+                # account_info blocks
                 acc_fields = {
                     'exp_date': profile_fields['exp_date'],
                     'created_date': profile_fields['created_date'],
@@ -2148,6 +2139,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     'account_id': profile_fields['account_id'],
                 }
                 acc = {}
+                _log_memory("before-account-info")
                 ar = safe_request(session, f"{portal_url}{api_path}",
                                   params={"type": "account_info", "action": "get_profile"},
                                   headers=auth_headers, cookies=cookies,
@@ -2159,7 +2151,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 if created:
                     res["created_date"] = created
 
-                # account_info/get_active_subscription
                 sub_fields = {
                     'exp_date': profile_fields['exp_date'],
                     'created_date': profile_fields['created_date'],
@@ -2178,7 +2169,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     sub = _extract_fields_from_stream(sr, sub_fields)
                 sr.close()
 
-                # account_info/get_main_info
                 main_fields = {
                     'exp_date': profile_fields['exp_date'],
                     'created_date': profile_fields['created_date'],
@@ -2207,7 +2197,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     _log_memory("mac-blocked2")
                     return sanitize_result(res)
 
-                # استخراج القيم المطلوبة
+                # استخراج القيم
                 max_conn = _pick([sub, main, acc, prof], ['max_connections'])
                 active_conn = _pick([sub, main, acc, prof], ['active_connections'])
                 if max_conn:
@@ -2227,7 +2217,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 if exp:
                     res["exp_date"] = exp
 
-                # محاولات إضافية خفيفة (لا تحمل بيانات ضخمة)
+                # محاولات إضافية خفيفة
                 extra_fields = {
                     'exp_date': profile_fields['exp_date'],
                     'created_date': profile_fields['created_date'],
@@ -2509,6 +2499,8 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
         })
 
     except Exception as outer_exc:
+        print("[MAC EXCEPTION]", repr(outer_exc))
+        traceback.print_exc()
         _log_memory("mac-crash")
         return sanitize_result({
             "server": portal_url,
@@ -2711,7 +2703,6 @@ def stream_results(job_id):
         q = job["q"]
         while True:
             try:
-                # استخدام timeout صغير جدًا لإرسال heartbeat كل 5 ثواني
                 item = q.get(timeout=5)
             except queuelib.Empty:
                 yield 'data: {"ping":1}\n\n'
