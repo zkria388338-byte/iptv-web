@@ -1,6 +1,6 @@
 # ══════════════════════════════════════════════════════════════
-#  IPTV Pro Inspector — Diagnostic Memory Version
-#  (جميع الإصلاحات السابقة + قياس استهلاك الذاكرة)
+#  IPTV Pro Inspector — v5.9.2-patched (Stability + Fixed get_all_channels)
+#  (جميع الإصلاحات السابقة + قياس الذاكرة + حل تعليق get_all_channels)
 # ══════════════════════════════════════════════════════════════
 from flask import Flask, render_template, request, jsonify, redirect, Response, stream_with_context
 import time, requests, urllib3, threading, re, json, random, uuid, socket, ssl, ipaddress, os
@@ -2363,67 +2363,63 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 raise CancelException("Cancelled")
             url = f"{portal_url}{api_path}"
             params = {"type": "itv", "action": "get_all_channels", "JsHttpRequest": "1-xml"}
-            with safe_request(session, url, params=params, headers=auth_headers,
-                              cookies=cookies, timeout=10, verify=False, stream=True) as cr:
-                if cr.status_code == 200:
-                    cr.raw.decode_content = True
-                    total_items = None
-                    sample = []
-                    current_item = {}
-                    item_index = 0
-                    step = 1
+            _log_memory("before-get_all_channels-request")
+            cr = safe_request(session, url, params=params, headers=auth_headers,
+                              cookies=cookies, timeout=15, verify=False)
+            _log_memory("after-get_all_channels-request")
+            if cr.status_code == 200:
+                _log_memory("before-get_all_channels-json")
+                cj = cr.json()
+                _log_memory("after-get_all_channels-json")
+                data_list = []
+                if isinstance(cj, dict):
+                    res["channels_count"] = int(cj.get("total_items") or len(cj.get("data", [])) or 0)
+                    data_list = cj.get("data", []) or []
+                elif isinstance(cj, list):
+                    res["channels_count"] = len(cj)
+                    data_list = cj
+                sample = []
+                if data_list:
+                    step = max(1, len(data_list) // 15)
+                    i = 0
+                    while i < len(data_list) and len(sample) < 20:
+                        sample.append(data_list[i])
+                        i += step
+                del data_list
+                del cj
+                gc.collect()
+                _log_memory("after-get_all_channels-sample")
 
-                    for prefix, event, value in ijson.parse(cr.raw):
-                        if prefix == 'js.total_items' and event == 'number':
-                            total_items = int(value)
-                            step = max(1, total_items // 15)
+                for ch in sample:
+                    if first_ch_id is None and isinstance(ch, dict) and ch.get("id"):
+                        first_ch_id = ch.get("id")
+                    c = isinstance(ch, dict) and ch.get("cmd") or None
+                    if c and ("http" in str(c) or str(c).startswith("ffrt")) and c not in cmds:
+                        cmds.append(str(c))
+                    if len(cmds) >= 10:
+                        break
 
-                        elif prefix == 'js.data.item':
-                            if event == 'start_map':
-                                current_item = {}
-                                collect_current = (item_index % step == 0)
-                            elif event == 'end_map':
-                                if collect_current:
-                                    sample.append(current_item)
-                                item_index += 1
-                                if total_items is not None and len(sample) >= 20:
-                                    break
-
-                        elif prefix.startswith('js.data.item.'):
-                            if event in ('string', 'number', 'boolean'):
-                                key = prefix.rsplit('.', 1)[-1]
-                                current_item[key] = value
-
-                    if total_items is not None:
-                        res["channels_count"] = total_items
+                if cmds:
+                    _log_memory("before-stream-test")
+                    stream_diag = []
+                    stream_result = _check_mac_stream(
+                        session, portal_url, api_path,
+                        auth_headers, cookies, cmds, job_id, diag=stream_diag)
+                    _log_memory("after-stream-test")
+                    if stream_result == "transcoder_detected":
+                        res["stream_ok"] = None
+                        res["rescue_method"] = (res.get("rescue_method", "") + " transcoder_detected").strip()
                     else:
-                        res["channels_count"] = len(sample) if sample else 0
-
-                    for ch in sample:
-                        if first_ch_id is None and 'id' in ch:
-                            first_ch_id = ch.get('id')
-                        c = ch.get('cmd')
-                        if c and ("http" in str(c) or str(c).startswith("ffrt")):
-                            cmds.append(str(c))
-                        if len(cmds) >= 10:
-                            break
-
-                    if cmds:
-                        stream_diag = []
-                        stream_result = _check_mac_stream(
-                            session, portal_url, api_path,
-                            auth_headers, cookies, cmds, job_id, diag=stream_diag)
-                        if stream_result == "transcoder_detected":
-                            res["stream_ok"] = None
-                            res["rescue_method"] = (res.get("rescue_method", "") + " transcoder_detected").strip()
-                        else:
-                            res["stream_ok"] = stream_result
-                        if stream_diag:
-                            res["diag"] = (res["diag"] + " | stream: " + ",".join(stream_diag))[:500]
+                        res["stream_ok"] = stream_result
+                    if stream_diag:
+                        res["diag"] = (res["diag"] + " | stream: " + ",".join(stream_diag))[:500]
+            cr.close()
         except CancelException:
             raise
-        except Exception:
+        except Exception as e:
+            _log_memory(f"get_all_channels-exc:{str(e)[:60]}")
             pass
+
         _log_memory("after-get_all_channels")
 
         try:
@@ -2670,7 +2666,7 @@ def check_servers():
 
             max_workers = 20
             if scan_type == "mac":
-                max_workers = 3
+                max_workers = 2
 
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 fmap = {}
