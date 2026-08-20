@@ -1,7 +1,7 @@
 # ══════════════════════════════════════════════════════════════
 #  IPTV Pro Inspector — v5.9.2-patched (PWA + Stability + Streaming JSON)
 #  (جميع الإصلاحات + استخراج تدفقي للبيانات + إصلاح الذاكرة + heartbeat
-#   + طباعة تفصيلية للاستثناءات + تحمل IncompleteJSONError)
+#   + طباعة تفصيلية للاستثناءات + تحمل IncompleteJSONError + Fix diag)
 # ══════════════════════════════════════════════════════════════
 from flask import Flask, render_template, request, jsonify, redirect, Response, stream_with_context
 import time, requests, urllib3, threading, re, json, random, uuid, socket, ssl, ipaddress, os
@@ -829,7 +829,6 @@ def _detect_xtream_modules(session, api_url, first_stream_id=None, job_id=None):
 
 def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_ch_id=None, job_id=None):
     modules = {"live": True, "vod": False, "series": False, "epg": False}
-    # VOD categories - قراءة أول عنصر فقط
     try:
         if job_id and is_cancelled(job_id):
             raise CancelException("Cancelled")
@@ -847,7 +846,6 @@ def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_c
         r.close()
     except Exception:
         pass
-    # Series categories
     try:
         if job_id and is_cancelled(job_id):
             raise CancelException("Cancelled")
@@ -865,7 +863,6 @@ def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_c
         r.close()
     except Exception:
         pass
-    # EPG info small
     if first_ch_id:
         try:
             if job_id and is_cancelled(job_id):
@@ -1966,6 +1963,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
             "series_count": 0,
             "failure_reason": ""
         }
+        diag = []
 
         _mac_host, _mac_port, _mac_scheme = _extract_host_port(portal_url)
         if _mac_host:
@@ -2135,7 +2133,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 pr.close()
                 _log_memory("after-profile")
 
-                # account_info blocks
                 acc_fields = {
                     'exp_date': profile_fields['exp_date'],
                     'created_date': profile_fields['created_date'],
@@ -2204,7 +2201,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     _log_memory("mac-blocked2")
                     return sanitize_result(res)
 
-                # استخراج القيم
                 max_conn = _pick([sub, main, acc, prof], ['max_connections'])
                 active_conn = _pick([sub, main, acc, prof], ['active_connections'])
                 if max_conn:
@@ -2224,7 +2220,6 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 if exp:
                     res["exp_date"] = exp
 
-                # محاولات إضافية خفيفة
                 extra_fields = {
                     'exp_date': profile_fields['exp_date'],
                     'created_date': profile_fields['created_date'],
