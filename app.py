@@ -1,7 +1,7 @@
 # ══════════════════════════════════════════════════════════════
 #  IPTV Pro Inspector — v5.9.2-patched (PWA + Stability + Streaming JSON)
 #  (جميع الإصلاحات + استخراج تدفقي للبيانات + إصلاح الذاكرة + heartbeat
-#   + طباعة تفصيلية للاستثناءات)
+#   + طباعة تفصيلية للاستثناءات + تحمل IncompleteJSONError)
 # ══════════════════════════════════════════════════════════════
 from flask import Flask, render_template, request, jsonify, redirect, Response, stream_with_context
 import time, requests, urllib3, threading, re, json, random, uuid, socket, ssl, ipaddress, os
@@ -582,24 +582,28 @@ def sanitize_result(res):
     return res
 
 # ══════════════════════════════════════════════════════════════
-#  استخراج حقول من JSON تدفقي
+#  استخراج حقول من JSON تدفقي (مع تحمل IncompleteJSONError)
 # ══════════════════════════════════════════════════════════════
 
 def _extract_fields_from_stream(resp, field_paths):
-    """
-    يقرأ استجابة تدفقية ويستخرج فقط الحقول المحددة من JSON.
-    field_paths: dict {field_name: list_of_possible_js_paths}
-    """
     found = {}
-    resp.raw.decode_content = True
-    for prefix, event, value in ijson.parse(resp.raw):
-        for field, paths in field_paths.items():
-            if field in found:
-                continue
-            if prefix in paths and event in ('string', 'number', 'boolean'):
-                found[field] = value
-        if len(found) == len(field_paths):
-            break
+    try:
+        resp.raw.decode_content = True
+        for prefix, event, value in ijson.parse(resp.raw):
+            for field, paths in field_paths.items():
+                if field in found:
+                    continue
+                if prefix in paths and event in ('string', 'number', 'boolean'):
+                    found[field] = value
+            if len(found) == len(field_paths):
+                break
+    except ijson.common.IncompleteJSONError:
+        # تم استقبال JSON غير مكتمل، نكتفي بما تم استخراجه
+        pass
+    except ijson.common.JSONError:
+        pass
+    except Exception:
+        pass
     return found
 
 # ══════════════════════════════════════════════════════════════
@@ -825,6 +829,7 @@ def _detect_xtream_modules(session, api_url, first_stream_id=None, job_id=None):
 
 def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_ch_id=None, job_id=None):
     modules = {"live": True, "vod": False, "series": False, "epg": False}
+    # VOD categories - قراءة أول عنصر فقط
     try:
         if job_id and is_cancelled(job_id):
             raise CancelException("Cancelled")
@@ -842,6 +847,7 @@ def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_c
         r.close()
     except Exception:
         pass
+    # Series categories
     try:
         if job_id and is_cancelled(job_id):
             raise CancelException("Cancelled")
@@ -859,6 +865,7 @@ def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_c
         r.close()
     except Exception:
         pass
+    # EPG info small
     if first_ch_id:
         try:
             if job_id and is_cancelled(job_id):
