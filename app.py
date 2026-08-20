@@ -1,6 +1,6 @@
 # ══════════════════════════════════════════════════════════════
-#  IPTV Pro Inspector — v5.9.2-patched (Stability + Fixed get_all_channels)
-#  (جميع الإصلاحات السابقة + قياس الذاكرة + حل تعليق get_all_channels)
+#  IPTV Pro Inspector — v5.9.2-patched (PWA + Stability + Streaming JSON)
+#  (جميع الإصلاحات + استخراج تدفقي للبيانات + إصلاح الذاكرة + heartbeat)
 # ══════════════════════════════════════════════════════════════
 from flask import Flask, render_template, request, jsonify, redirect, Response, stream_with_context
 import time, requests, urllib3, threading, re, json, random, uuid, socket, ssl, ipaddress, os
@@ -31,24 +31,6 @@ def _get_memory_mb():
 
 def _log_memory(tag=""):
     print(f"[MEM] {tag} {_get_memory_mb():.2f}MB", flush=True)
-
-# ══════════════════════════════════════════════════════════════
-#  دالة توليد PNG بسيطة (لأيقونات PWA)
-# ══════════════════════════════════════════════════════════════
-def _generate_png(width, height, rgb=(59, 130, 246)):
-    def chunk(typ, data):
-        c = struct.pack('>I', len(data)) + typ + data
-        c += struct.pack('>I', zlib.crc32(typ + data) & 0xffffffff)
-        return c
-
-    sig = b'\x89PNG\r\n\x1a\n'
-    ihdr = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
-    raw = b''
-    for _ in range(height):
-        raw += b'\x00'
-        raw += bytes(rgb) * width
-    idat = zlib.compress(raw)
-    return sig + chunk(b'IHDR', ihdr) + chunk(b'IDAT', idat) + chunk(b'IEND', b'')
 
 # ══════════════════════════════════════════════════════════════
 #  PWA Routes
@@ -329,7 +311,7 @@ def _cleanup_old_jobs():
             _JOBS.pop(jid, None)
 
 # ══════════════════════════════════════════════════════════════
-#  v5.9 FIX 7 — unified cache cleanup
+#  Cache cleanup
 # ══════════════════════════════════════════════════════════════
 
 def _cleanup_caches():
@@ -420,6 +402,20 @@ def _cleanup_caches():
 # ══════════════════════════════════════════════════════════════
 #  Helpers
 # ══════════════════════════════════════════════════════════════
+
+def _generate_png(width, height, rgb=(59, 130, 246)):
+    def chunk(typ, data):
+        c = struct.pack('>I', len(data)) + typ + data
+        c += struct.pack('>I', zlib.crc32(typ + data) & 0xffffffff)
+        return c
+    sig = b'\x89PNG\r\n\x1a\n'
+    ihdr = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
+    raw = b''
+    for _ in range(height):
+        raw += b'\x00'
+        raw += bytes(rgb) * width
+    idat = zlib.compress(raw)
+    return sig + chunk(b'IHDR', ihdr) + chunk(b'IDAT', idat) + chunk(b'IEND', b'')
 
 def discover_api_path(session, portal_url, headers, cookies):
     for base in (f"{portal_url}/c/", f"{portal_url}/c", f"{portal_url}/"):
@@ -582,6 +578,31 @@ def sanitize_result(res):
     res.pop("password", None)
     res.pop("m3u_url", None)
     return res
+
+# ══════════════════════════════════════════════════════════════
+#  استخراج حقول من JSON تدفقي
+# ══════════════════════════════════════════════════════════════
+
+def _extract_fields_from_stream(resp, field_paths):
+    """
+    يقرأ استجابة تدفقية ويستخرج فقط الحقول المحددة من JSON.
+    field_paths: dict {field_name: list_of_possible_js_paths}
+    """
+    found = {}
+    resp.raw.decode_content = True
+    for prefix, event, value in ijson.parse(resp.raw):
+        for field, paths in field_paths.items():
+            if field in found:
+                continue
+            if prefix in paths and event in ('string', 'number', 'boolean'):
+                found[field] = value
+        if len(found) == len(field_paths):
+            break
+    return found
+
+# ══════════════════════════════════════════════════════════════
+#  Checkers
+# ══════════════════════════════════════════════════════════════
 
 def _check_xtream_stream(session, server_url, username, password, stream_ids, job_id=None):
     hard_fail = False
@@ -751,7 +772,7 @@ def _check_mac_stream(session, portal_url, api_path, headers, cookies, cmds, job
     return None
 
 # ══════════════════════════════════════════════════════════════
-#  Module Detection
+#  Module Detection (خفيفة)
 # ══════════════════════════════════════════════════════════════
 
 def _detect_xtream_modules(session, api_url, first_stream_id=None, job_id=None):
@@ -760,8 +781,9 @@ def _detect_xtream_modules(session, api_url, first_stream_id=None, job_id=None):
         if job_id and is_cancelled(job_id):
             raise CancelException("Cancelled")
         r = safe_request(session, f"{api_url}&action=get_vod_categories",
-                         headers=HEADERS, timeout=5, verify=False)
+                         headers=HEADERS, timeout=5, verify=False, stream=True)
         if r.status_code == 200:
+            r.raw.decode_content = True
             for prefix, event, value in ijson.parse(r.raw):
                 if event == 'start_array' and prefix == '':
                     modules["vod"] = True
@@ -773,8 +795,9 @@ def _detect_xtream_modules(session, api_url, first_stream_id=None, job_id=None):
         if job_id and is_cancelled(job_id):
             raise CancelException("Cancelled")
         r = safe_request(session, f"{api_url}&action=get_series_categories",
-                         headers=HEADERS, timeout=5, verify=False)
+                         headers=HEADERS, timeout=5, verify=False, stream=True)
         if r.status_code == 200:
+            r.raw.decode_content = True
             for prefix, event, value in ijson.parse(r.raw):
                 if event == 'start_array' and prefix == '':
                     modules["series"] = True
@@ -789,6 +812,7 @@ def _detect_xtream_modules(session, api_url, first_stream_id=None, job_id=None):
             r = safe_request(session, f"{api_url}&action=get_short_epg&stream_id={first_stream_id}",
                              headers=HEADERS, timeout=5, verify=False)
             if r.status_code == 200:
+                # EPG قد تكون صغيرة، نقرأها عادي
                 j = r.json()
                 epg_list = j.get("epg_listings") if isinstance(j, dict) else None
                 if isinstance(epg_list, list) and len(epg_list) > 0:
@@ -800,6 +824,7 @@ def _detect_xtream_modules(session, api_url, first_stream_id=None, job_id=None):
 
 def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_ch_id=None, job_id=None):
     modules = {"live": True, "vod": False, "series": False, "epg": False}
+    # VOD categories - قراءة أول عنصر فقط
     try:
         if job_id and is_cancelled(job_id):
             raise CancelException("Cancelled")
@@ -817,6 +842,7 @@ def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_c
         r.close()
     except Exception:
         pass
+    # Series categories
     try:
         if job_id and is_cancelled(job_id):
             raise CancelException("Cancelled")
@@ -834,6 +860,7 @@ def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_c
         r.close()
     except Exception:
         pass
+    # EPG info small
     if first_ch_id:
         try:
             if job_id and is_cancelled(job_id):
@@ -2027,8 +2054,10 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 res["api_path"] = api_path
                 _log_memory("after-handshake")
 
+                # استخراج token فقط من handshake
                 token = ""
                 try:
+                    # handshake response صغيرة، نقرأها عادي
                     j = hs_resp.json()
                     if isinstance(j, dict):
                         token = ((j.get("js") or {}).get("token", "")
@@ -2066,134 +2095,108 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     "timestamp": str(int(time.time())), "api_signature": "262",
                 }
 
+                # استخدام استخراج تدفقي للـ profile
+                profile_fields = {
+                    'token': ['js.token'],
+                    'exp_date': ['js.exp_date', 'js.expire_date', 'js.expiration_date', 'js.end_date',
+                                 'js.valid_to', 'js.account_expire', 'js.status_expiration', 'js.tariff_expiration'],
+                    'created_date': ['js.created', 'js.created_at', 'js.account_created',
+                                     'js.registration_date', 'js.reg_date', 'js.date_created'],
+                    'max_connections': ['js.max_connections', 'js.max_cons', 'js.max_users',
+                                        'js.max_clients', 'js.connection_limit', 'js.allowed_connections'],
+                    'active_connections': ['js.active_connections', 'js.active_cons', 'js.online',
+                                           'js.current_connections', 'js.connections', 'js.current_users',
+                                           'js.active_users', 'js.number_of_connections'],
+                    'tariff_plan_name': ['js.tariff_plan_name', 'js.plan_name', 'js.tariff_name', 'js.name'],
+                    'sub_id': ['js.sub_id', 'js.subscription_id', 'js.id'],
+                    'account_id': ['js.account_id', 'js.user_id'],
+                }
                 prof = {}
-                profile_ok = False
-                pr = None
-                try:
-                    if job_id and is_cancelled(job_id):
-                        raise CancelException("Cancelled")
-                    pr = safe_request(session, f"{portal_url}{api_path}", params=mag_params,
-                                      headers=auth_headers, cookies=cookies,
-                                      timeout=5, verify=False)
-                    profile_ok = (pr.status_code == 200)
-                except CancelException:
-                    raise
-                except Exception:
-                    pass
-                if not profile_ok:
-                    try:
-                        if job_id and is_cancelled(job_id):
-                            raise CancelException("Cancelled")
-                        pr = safe_request(session,
-                            f"{portal_url}{api_path}?type=stb&action=get_profile&hd=1",
-                            headers=auth_headers, cookies=cookies, timeout=5, verify=False)
-                        profile_ok = (pr.status_code == 200)
-                    except CancelException:
-                        raise
-                    except Exception:
-                        pass
-                if profile_ok and pr is not None:
-                    try:
-                        prof = (pr.json() or {}).get("js", {}) or {}
-                        if _looks_blocked(prof):
-                            res["status"] = "Blocked"
-                            res["error"] = "STB Blocked (provider)"
-                            res["failure_reason"] = "STB_BLOCKED"
-                            res["auth_valid"] = False
-                            pr.close()
-                            _log_memory("mac-blocked")
-                            return sanitize_result(res)
-                        new_tok = prof.get("token", "")
-                        if new_tok:
-                            auth_headers["Authorization"] = f"Bearer {new_tok}"
-                    except Exception:
-                        pass
-                    finally:
-                        if pr:
-                            pr.close()
-                if not profile_ok:
-                    res["error"] = "MAC Blocked / Expired"
-                    res["failure_reason"] = "MAC_BLOCKED"
-                    _log_memory("mac-profile-fail")
-                    return sanitize_result(res)
+                pr = safe_request(session, f"{portal_url}{api_path}", params=mag_params,
+                                  headers=auth_headers, cookies=cookies,
+                                  timeout=8, verify=False, stream=True)
+                if pr.status_code == 200:
+                    prof = _extract_fields_from_stream(pr, profile_fields)
+                    if _looks_blocked(prof):
+                        res["status"] = "Blocked"
+                        res["error"] = "STB Blocked (provider)"
+                        res["failure_reason"] = "STB_BLOCKED"
+                        res["auth_valid"] = False
+                        pr.close()
+                        _log_memory("mac-blocked")
+                        return sanitize_result(res)
+                    new_tok = prof.get('token', '')
+                    if new_tok:
+                        auth_headers["Authorization"] = f"Bearer {new_tok}"
+                pr.close()
+                _log_memory("after-profile")
 
+                # نعتبر المصادقة صحيحة إذا نجح get_profile
                 res["auth_valid"] = True
                 res["status"] = "Active MAC"
                 res["modules"]["live"] = True
                 diag = []
-                _log_memory("after-profile")
 
-                date_keys = [
-                    "expire_date", "exp_date", "expiration_date", "expires",
-                    "end_date", "valid_to", "account_expire",
-                    "phone", "status_expiration", "tariff_expiration"
-                ]
-                created_keys = [
-                    "created", "created_at", "account_created",
-                    "registration_date", "reg_date", "date_created"
-                ]
-
+                # account_info/get_profile
+                acc_fields = {
+                    'exp_date': profile_fields['exp_date'],
+                    'created_date': profile_fields['created_date'],
+                    'max_connections': profile_fields['max_connections'],
+                    'active_connections': profile_fields['active_connections'],
+                    'tariff_plan_name': profile_fields['tariff_plan_name'],
+                    'sub_id': profile_fields['sub_id'],
+                    'account_id': profile_fields['account_id'],
+                }
                 acc = {}
-                try:
-                    if job_id and is_cancelled(job_id):
-                        raise CancelException("Cancelled")
-                    ar = safe_request(session, f"{portal_url}{api_path}",
-                                      params={"type": "account_info", "action": "get_profile"},
-                                      headers=auth_headers, cookies=cookies,
-                                      timeout=5, verify=False)
-                    diag.append(f"acc:{ar.status_code}")
-                    if ar.status_code == 200:
-                        acc = (ar.json() or {}).get("js", {}) or {}
-                    ar.close()
-                except CancelException:
-                    raise
-                except Exception:
-                    diag.append("acc:ERR")
-                created = _pick_date(acc, created_keys)
+                ar = safe_request(session, f"{portal_url}{api_path}",
+                                  params={"type": "account_info", "action": "get_profile"},
+                                  headers=auth_headers, cookies=cookies,
+                                  timeout=8, verify=False, stream=True)
+                if ar.status_code == 200:
+                    acc = _extract_fields_from_stream(ar, acc_fields)
+                ar.close()
+                created = _pick_date(acc, ['created_date'])
                 if created:
                     res["created_date"] = created
 
+                # account_info/get_active_subscription
+                sub_fields = {
+                    'exp_date': profile_fields['exp_date'],
+                    'created_date': profile_fields['created_date'],
+                    'max_connections': profile_fields['max_connections'],
+                    'active_connections': profile_fields['active_connections'],
+                    'tariff_plan_name': profile_fields['tariff_plan_name'],
+                    'sub_id': profile_fields['sub_id'],
+                    'account_id': profile_fields['account_id'],
+                }
                 sub = {}
-                try:
-                    if job_id and is_cancelled(job_id):
-                        raise CancelException("Cancelled")
-                    sr = safe_request(session, f"{portal_url}{api_path}",
-                                      params={"type": "account_info",
-                                              "action": "get_active_subscription"},
-                                      headers=auth_headers, cookies=cookies,
-                                      timeout=5, verify=False)
-                    diag.append(f"sub:{sr.status_code}")
-                    if sr.status_code == 200:
-                        sj = (sr.json() or {}).get("js", {}) or {}
-                        if isinstance(sj, dict):
-                            sub = sj
-                            if isinstance(sj.get("subscriptions"), list) and sj["subscriptions"]:
-                                first = sj["subscriptions"][0]
-                                if isinstance(first, dict):
-                                    sub.update(first)
-                    sr.close()
-                except CancelException:
-                    raise
-                except Exception:
-                    diag.append("sub:ERR")
+                sr = safe_request(session, f"{portal_url}{api_path}",
+                                  params={"type": "account_info", "action": "get_active_subscription"},
+                                  headers=auth_headers, cookies=cookies,
+                                  timeout=8, verify=False, stream=True)
+                if sr.status_code == 200:
+                    sub = _extract_fields_from_stream(sr, sub_fields)
+                sr.close()
 
+                # account_info/get_main_info
+                main_fields = {
+                    'exp_date': profile_fields['exp_date'],
+                    'created_date': profile_fields['created_date'],
+                    'max_connections': profile_fields['max_connections'],
+                    'active_connections': profile_fields['active_connections'],
+                    'tariff_plan_name': profile_fields['tariff_plan_name'],
+                    'sub_id': profile_fields['sub_id'],
+                    'account_id': profile_fields['account_id'],
+                }
                 main = {}
-                try:
-                    if job_id and is_cancelled(job_id):
-                        raise CancelException("Cancelled")
-                    mr = safe_request(session, f"{portal_url}{api_path}",
-                                      params={"type": "account_info", "action": "get_main_info",
-                                              "JsHttpRequest": "1-xml"},
-                                      headers=auth_headers, cookies=cookies,
-                                      timeout=5, verify=False)
-                    diag.append(f"main:{mr.status_code}")
-                    if mr.status_code == 200:
-                        main = (mr.json() or {}).get("js", {}) or {}
-                    mr.close()
-                except CancelException:
-                    raise
-                except Exception:
-                    diag.append("main:ERR")
+                mr = safe_request(session, f"{portal_url}{api_path}",
+                                  params={"type": "account_info", "action": "get_main_info",
+                                          "JsHttpRequest": "1-xml"},
+                                  headers=auth_headers, cookies=cookies,
+                                  timeout=8, verify=False, stream=True)
+                if mr.status_code == 200:
+                    main = _extract_fields_from_stream(mr, main_fields)
+                mr.close()
                 _log_memory("after-account-info")
 
                 if _looks_blocked({"p": prof, "a": acc, "s": sub, "m": main}):
@@ -2204,89 +2207,54 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     _log_memory("mac-blocked2")
                     return sanitize_result(res)
 
-                conn_keys_max = ["max_connections", "max_cons", "max_users",
-                                 "max_clients", "connection_limit", "allowed_connections",
-                                 "max_conn"]
-                conn_keys_active = ["active_connections", "active_cons", "online",
-                                    "current_connections", "connections", "current_users",
-                                    "active_users", "number_of_connections"]
-
-                def _extract_first(dicts_list, keys):
-                    for d in dicts_list:
-                        if not isinstance(d, dict):
-                            continue
-                        for k in keys:
-                            if k in d:
-                                v = d[k]
-                                if v is not None and str(v).strip() not in ("", "0", "None", "null"):
-                                    try:
-                                        return str(int(v))
-                                    except:
-                                        return str(v)
-                    return None
-
-                max_conn = _extract_first([sub, main, acc, prof], conn_keys_max)
-                active_conn = _extract_first([sub, main, acc, prof], conn_keys_active)
+                # استخراج القيم المطلوبة
+                max_conn = _pick([sub, main, acc, prof], ['max_connections'])
+                active_conn = _pick([sub, main, acc, prof], ['active_connections'])
                 if max_conn:
                     res["max_connections"] = max_conn
                 if active_conn:
                     res["active_connections"] = active_conn
 
                 plan_name = str(
-                    _pick(sub, ["tariff_plan_name", "plan_name", "tariff_name", "name"])
-                    or _pick(main, ["tariff_plan_name", "tariff_name", "plan_name"])
-                    or _pick(acc, ["tariff_plan_name", "plan_name", "tariff_name"])
-                    or ""
+                    _pick([sub, main, acc, prof], ['tariff_plan_name']) or ""
                 )
 
-                exp = (_pick_date(sub, date_keys)
-                       or _pick_date(main, date_keys)
-                       or _pick_date(acc, date_keys))
-                if not exp:
-                    exp = (_scan_date_in_values(sub)
-                           or _scan_date_in_values(main)
-                           or _scan_date_in_values(acc))
+                exp = (_pick_date([sub, main, acc, prof], ['exp_date'])
+                       or _pick_date([sub, main, acc, prof], ['created_date'])
+                       or _scan_date_in_values(sub)
+                       or _scan_date_in_values(main)
+                       or _scan_date_in_values(acc))
                 if exp:
                     res["exp_date"] = exp
 
-                def _safe_get_json(params, tag):
-                    try:
-                        if job_id and is_cancelled(job_id):
-                            raise CancelException("Cancelled")
-                        rr = safe_request(session, f"{portal_url}{api_path}",
-                                          params=params,
-                                          headers=auth_headers, cookies=cookies,
-                                          timeout=5, verify=False)
-                        if rr.status_code == 200:
-                            diag.append(f"{tag}:{rr.status_code}")
-                            jj = (rr.json() or {}).get("js", {}) or {}
-                            rr.close()
-                            return jj
-                        else:
-                            diag.append(f"{tag}:{rr.status_code}")
-                            rr.close()
-                            return {}
-                    except CancelException:
-                        raise
-                    except Exception:
-                        diag.append(f"{tag}:ERR")
-                        return {}
+                # محاولات إضافية خفيفة (لا تحمل بيانات ضخمة)
+                extra_fields = {
+                    'exp_date': profile_fields['exp_date'],
+                    'created_date': profile_fields['created_date'],
+                    'max_connections': profile_fields['max_connections'],
+                    'active_connections': profile_fields['active_connections'],
+                    'tariff_plan_name': profile_fields['tariff_plan_name'],
+                    'sub_id': profile_fields['sub_id'],
+                    'account_id': profile_fields['account_id'],
+                }
+                extra_data = {}
 
-                sub_id = _pick(sub, ["sub_id", "subscription_id", "id"])
-                if not sub_id:
-                    sub_id = _pick(main, ["sub_id", "subscription_id", "id"])
-                if not sub_id:
-                    sub_id = _pick(acc, ["sub_id", "subscription_id", "id"])
-                if not sub_id:
-                    sub_id = _pick(prof, ["sub_id", "subscription_id", "id"])
+                def _safe_extract(params, tag):
+                    if job_id and is_cancelled(job_id):
+                        raise CancelException("Cancelled")
+                    rr = safe_request(session, f"{portal_url}{api_path}",
+                                      params=params,
+                                      headers=auth_headers, cookies=cookies,
+                                      timeout=8, verify=False, stream=True)
+                    if rr.status_code == 200:
+                        dd = _extract_fields_from_stream(rr, extra_fields)
+                        rr.close()
+                        return dd
+                    rr.close()
+                    return {}
 
-                account_id = _pick(sub, ["account_id", "user_id"])
-                if not account_id:
-                    account_id = _pick(main, ["account_id", "user_id"])
-                if not account_id:
-                    account_id = _pick(acc, ["account_id", "user_id"])
-                if not account_id:
-                    account_id = _pick(prof, ["account_id", "user_id"])
+                sub_id = _pick([sub, main, acc, prof], ['sub_id'])
+                account_id = _pick([sub, main, acc, prof], ['account_id'])
 
                 extra_sub_params = {"type": "account_info", "action": "get_subscription",
                                     "JsHttpRequest": "1-xml"}
@@ -2300,29 +2268,29 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 if account_id:
                     extra_sub_params["account_id"] = account_id
 
-                extra_sub = _safe_get_json(extra_sub_params, "extra_sub")
-                extra_user = _safe_get_json(extra_user_params, "extra_user")
-                extra_acc = _safe_get_json(extra_acc_params, "extra_acc")
+                extra_sub = _safe_extract(extra_sub_params, "extra_sub")
+                extra_user = _safe_extract(extra_user_params, "extra_user")
+                extra_acc = _safe_extract(extra_acc_params, "extra_acc")
 
-                extra_data = {}
                 for d in [extra_sub, extra_user, extra_acc]:
                     if isinstance(d, dict):
-                        extra_data.update(d)
+                        for k, v in d.items():
+                            if v:
+                                extra_data[k] = v
 
-                exp_extra = (_pick_date(extra_data, date_keys)
-                             or _scan_date_in_values(extra_data))
+                exp_extra = _pick_date([extra_data], ['exp_date'])
                 if exp_extra:
                     res["exp_date"] = exp_extra
                     exp = exp_extra
 
                 if not created:
-                    created_extra = _pick_date(extra_data, created_keys)
+                    created_extra = _pick_date([extra_data], ['created_date'])
                     if created_extra:
                         res["created_date"] = created_extra
                         created = created_extra
 
-                max_conn_extra = _extract_first([extra_data], conn_keys_max)
-                active_conn_extra = _extract_first([extra_data], conn_keys_active)
+                max_conn_extra = _pick([extra_data], ['max_connections'])
+                active_conn_extra = _pick([extra_data], ['active_connections'])
                 if max_conn_extra:
                     res["max_connections"] = max_conn_extra
                 if active_conn_extra:
@@ -2365,30 +2333,39 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
             params = {"type": "itv", "action": "get_all_channels", "JsHttpRequest": "1-xml"}
             _log_memory("before-get_all_channels-request")
             cr = safe_request(session, url, params=params, headers=auth_headers,
-                              cookies=cookies, timeout=15, verify=False)
+                              cookies=cookies, timeout=15, verify=False, stream=True)
             _log_memory("after-get_all_channels-request")
             if cr.status_code == 200:
-                _log_memory("before-get_all_channels-json")
-                cj = cr.json()
-                _log_memory("after-get_all_channels-json")
-                data_list = []
-                if isinstance(cj, dict):
-                    res["channels_count"] = int(cj.get("total_items") or len(cj.get("data", [])) or 0)
-                    data_list = cj.get("data", []) or []
-                elif isinstance(cj, list):
-                    res["channels_count"] = len(cj)
-                    data_list = cj
+                cr.raw.decode_content = True
+                total_items = None
                 sample = []
-                if data_list:
-                    step = max(1, len(data_list) // 15)
-                    i = 0
-                    while i < len(data_list) and len(sample) < 20:
-                        sample.append(data_list[i])
-                        i += step
-                del data_list
-                del cj
-                gc.collect()
-                _log_memory("after-get_all_channels-sample")
+                current_item = {}
+                item_index = 0
+                step = 1
+
+                for prefix, event, value in ijson.parse(cr.raw):
+                    if prefix == 'js.total_items' and event == 'number':
+                        total_items = int(value)
+                        step = max(1, total_items // 15)
+                    elif prefix == 'js.data.item':
+                        if event == 'start_map':
+                            current_item = {}
+                            collect_current = (item_index % step == 0)
+                        elif event == 'end_map':
+                            if collect_current:
+                                sample.append(current_item)
+                            item_index += 1
+                            if total_items is not None and len(sample) >= 20:
+                                break
+                    elif prefix.startswith('js.data.item.'):
+                        if event in ('string', 'number', 'boolean'):
+                            key = prefix.rsplit('.', 1)[-1]
+                            current_item[key] = value
+
+                if total_items is not None:
+                    res["channels_count"] = total_items
+                else:
+                    res["channels_count"] = len(sample) if sample else 0
 
                 for ch in sample:
                     if first_ch_id is None and isinstance(ch, dict) and ch.get("id"):
@@ -2734,7 +2711,8 @@ def stream_results(job_id):
         q = job["q"]
         while True:
             try:
-                item = q.get(timeout=20)
+                # استخدام timeout صغير جدًا لإرسال heartbeat كل 5 ثواني
+                item = q.get(timeout=5)
             except queuelib.Empty:
                 yield 'data: {"ping":1}\n\n'
                 continue
