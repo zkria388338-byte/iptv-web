@@ -3,7 +3,8 @@
 #  (جميع الإصلاحات + دعم عدد الاتصالات + إصلاح ffmpeg + تمييز الرفض
 #   + محاولات إضافية لاستخراج تاريخ الانتهاء وعدد الأجهزة
 #   + دعم PWA كامل + تحسينات الذاكرة والاستقرار
-#   + استخدام ijson للقراءة التدفقية للاستجابات الضخمة)
+#   + استخدام ijson للقراءة التدفقية للاستجابات الضخمة
+#   + إصلاح توزيع العينة في get_all_channels)
 # ══════════════════════════════════════════════════════════════
 from flask import Flask, render_template, request, jsonify, redirect, Response, stream_with_context
 import time, requests, urllib3, threading, re, json, random, uuid, socket, ssl, ipaddress, os
@@ -864,9 +865,6 @@ def _fetch_xtream_series_count(session, api_url, job_id=None):
         return 0
 
 def _fetch_mac_count_light(session, portal_url, api_path, headers, cookies, media_type, job_id=None):
-    """
-    جلب عدد العناصر (VOD/Series) بدون تحميل البيانات كاملة.
-    """
     if job_id and is_cancelled(job_id):
         raise CancelException("Cancelled")
     try:
@@ -884,7 +882,6 @@ def _fetch_mac_count_light(session, portal_url, api_path, headers, cookies, medi
                     total = int(value)
                     break
                 if prefix.startswith('js.data') and event == 'start_array':
-                    # إذا لم نجد total_items، نتوقف فوراً ونتجاهل
                     break
             if total is not None:
                 return total
@@ -1246,7 +1243,7 @@ def _rescue_try_getphp_m3u(session, base_url, username, password):
         return False, None, 0
 
 # ══════════════════════════════════════════════════════════════
-#  Bridge: MAC → M3U (يترك r.json() كما هو لأن البيانات تستخدم كاملة)
+#  Bridge: MAC → M3U
 # ══════════════════════════════════════════════════════════════
 
 _BRIDGE_AUTH = {}
@@ -1731,7 +1728,6 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
                             if sid and sid not in ids:
                                 ids.append(sid)
                         if len(ids) >= 10:
-                            # نواصل العد فقط دون تخزين
                             pass
                     res["channels_count"] = total
                     if ids:
@@ -2279,36 +2275,47 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                               cookies=cookies, timeout=10, verify=False, stream=True) as cr:
                 if cr.status_code == 200:
                     cr.raw.decode_content = True
-                    # استخدام ijson لاستخراج total_items وعينة فقط
                     total_items = None
                     sample = []
-                    data_item = {}
+                    current_item = {}
+                    item_index = 0
+                    step = 1
+
                     for prefix, event, value in ijson.parse(cr.raw):
                         if prefix == 'js.total_items' and event == 'number':
                             total_items = int(value)
-                        elif prefix.startswith('js.data.item'):
+                            step = max(1, total_items // 15)
+
+                        elif prefix == 'js.data.item':
                             if event == 'start_map':
-                                data_item = {}
-                            elif event in ('string', 'number', 'boolean') and prefix.startswith('js.data.item.'):
-                                key = prefix.rsplit('.', 1)[-1]
-                                data_item[key] = value
+                                current_item = {}
+                                collect_current = (item_index % step == 0)
                             elif event == 'end_map':
-                                sample.append(data_item)
-                                if first_ch_id is None and 'id' in data_item:
-                                    first_ch_id = data_item['id']
-                        if total_items is not None and len(sample) >= 20:
-                            break
+                                if collect_current:
+                                    sample.append(current_item)
+                                item_index += 1
+                                if total_items is not None and len(sample) >= 20:
+                                    break
+
+                        elif prefix.startswith('js.data.item.'):
+                            if event in ('string', 'number', 'boolean'):
+                                key = prefix.rsplit('.', 1)[-1]
+                                current_item[key] = value
+
                     if total_items is not None:
                         res["channels_count"] = total_items
                     else:
                         res["channels_count"] = len(sample) if sample else 0
 
                     for ch in sample:
+                        if first_ch_id is None and 'id' in ch:
+                            first_ch_id = ch.get('id')
                         c = ch.get('cmd')
                         if c and ("http" in str(c) or str(c).startswith("ffrt")):
                             cmds.append(str(c))
                         if len(cmds) >= 10:
                             break
+
                     if cmds:
                         stream_diag = []
                         stream_result = _check_mac_stream(
