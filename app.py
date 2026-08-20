@@ -1,7 +1,8 @@
 # ══════════════════════════════════════════════════════════════
 #  IPTV Pro Inspector — v5.9.2-patched (PWA + Stability + Streaming JSON)
 #  (جميع الإصلاحات + استخراج تدفقي للبيانات + إصلاح الذاكرة + heartbeat
-#   + طباعة تفصيلية للاستثناءات + تحمل IncompleteJSONError + Fix diag)
+#   + طباعة تفصيلية للاستثناءات + تحمل IncompleteJSONError + Fix diag
+#   + استبدال get_all_channels بـ r.json() لتقليل GIL contention)
 # ══════════════════════════════════════════════════════════════
 from flask import Flask, render_template, request, jsonify, redirect, Response, stream_with_context
 import time, requests, urllib3, threading, re, json, random, uuid, socket, ssl, ipaddress, os
@@ -598,7 +599,6 @@ def _extract_fields_from_stream(resp, field_paths):
             if len(found) == len(field_paths):
                 break
     except ijson.common.IncompleteJSONError:
-        # تم استقبال JSON غير مكتمل، نكتفي بما تم استخراجه
         pass
     except ijson.common.JSONError:
         pass
@@ -2325,39 +2325,31 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
             params = {"type": "itv", "action": "get_all_channels", "JsHttpRequest": "1-xml"}
             _log_memory("before-get_all_channels-request")
             cr = safe_request(session, url, params=params, headers=auth_headers,
-                              cookies=cookies, timeout=15, verify=False, stream=True)
+                              cookies=cookies, timeout=15, verify=False)
             _log_memory("after-get_all_channels-request")
             if cr.status_code == 200:
-                cr.raw.decode_content = True
-                total_items = None
+                _log_memory("before-get_all_channels-json")
+                cj = cr.json()
+                _log_memory("after-get_all_channels-json")
+                data_list = []
+                if isinstance(cj, dict):
+                    res["channels_count"] = int(cj.get("total_items") or len(cj.get("data", [])) or 0)
+                    data_list = cj.get("data", []) or []
+                elif isinstance(cj, list):
+                    res["channels_count"] = len(cj)
+                    data_list = cj
+
                 sample = []
-                current_item = {}
-                item_index = 0
-                step = 1
-
-                for prefix, event, value in ijson.parse(cr.raw):
-                    if prefix == 'js.total_items' and event == 'number':
-                        total_items = int(value)
-                        step = max(1, total_items // 15)
-                    elif prefix == 'js.data.item':
-                        if event == 'start_map':
-                            current_item = {}
-                            collect_current = (item_index % step == 0)
-                        elif event == 'end_map':
-                            if collect_current:
-                                sample.append(current_item)
-                            item_index += 1
-                            if total_items is not None and len(sample) >= 20:
-                                break
-                    elif prefix.startswith('js.data.item.'):
-                        if event in ('string', 'number', 'boolean'):
-                            key = prefix.rsplit('.', 1)[-1]
-                            current_item[key] = value
-
-                if total_items is not None:
-                    res["channels_count"] = total_items
-                else:
-                    res["channels_count"] = len(sample) if sample else 0
+                if data_list:
+                    step = max(1, len(data_list) // 15)
+                    i = 0
+                    while i < len(data_list) and len(sample) < 20:
+                        sample.append(data_list[i])
+                        i += step
+                del data_list
+                del cj
+                gc.collect()
+                _log_memory("after-get_all_channels-sample")
 
                 for ch in sample:
                     if first_ch_id is None and isinstance(ch, dict) and ch.get("id"):
