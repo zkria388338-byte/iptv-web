@@ -4,7 +4,8 @@
 #   + محاولات إضافية لاستخراج تاريخ الانتهاء وعدد الأجهزة
 #   + دعم PWA كامل + تحسينات الذاكرة والاستقرار
 #   + استخدام ijson للقراءة التدفقية للاستجابات الضخمة
-#   + إصلاح توزيع العينة في get_all_channels)
+#   + إصلاح توزيع العينة في get_all_channels
+#   + إغلاق الجلسات والاستجابات + تقليل عمال MAC إلى 3)
 # ══════════════════════════════════════════════════════════════
 from flask import Flask, render_template, request, jsonify, redirect, Response, stream_with_context
 import time, requests, urllib3, threading, re, json, random, uuid, socket, ssl, ipaddress, os
@@ -36,7 +37,7 @@ def _generate_png(width, height, rgb=(59, 130, 246)):
     ihdr = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
     raw = b''
     for _ in range(height):
-        raw += b'\x00'  # filter none
+        raw += b'\x00'
         raw += bytes(rgb) * width
     idat = zlib.compress(raw)
     return sig + chunk(b'IHDR', ihdr) + chunk(b'IDAT', idat) + chunk(b'IEND', b'')
@@ -418,10 +419,12 @@ def discover_api_path(session, portal_url, headers, cookies):
             r = safe_request(session, base, headers=headers, cookies=cookies,
                              timeout=5, verify=False, allow_redirects=True)
             if r.status_code != 200:
+                r.close()
                 continue
             m = re.search(r'["\']([^"\'\s]*(?:load\.php|portal\.2\.php|portal\.php))', r.text)
-            if m:
-                p = m.group(1)
+            p = m.group(1) if m else None
+            r.close()
+            if p:
                 p = urlparse(p).path if p.startswith("http") else p
                 if p.startswith("./"):
                     p = p[2:]
@@ -429,6 +432,11 @@ def discover_api_path(session, portal_url, headers, cookies):
                     p = "/" + p
                 return p
         except Exception:
+            try:
+                if r:
+                    r.close()
+            except Exception:
+                pass
             continue
     return None
 
@@ -689,8 +697,10 @@ def _check_mac_stream(session, portal_url, api_path, headers, cookies, cmds, job
                 if r.status_code in (401, 403):
                     explicit_blocked = True
                 d(f"cl{i}:clHTTP{r.status_code}")
+                r.close()
                 continue
             js = (r.json() or {}).get("js", "") or {}
+            r.close()
             raw_url = (js.get("url") or js.get("cmd")) if isinstance(js, dict) else str(js)
             link_url = _prep(raw_url)
             if link_url and len(sample_urls) < 3:
@@ -744,9 +754,12 @@ def _detect_xtream_modules(session, api_url, first_stream_id=None, job_id=None):
         r = safe_request(session, f"{api_url}&action=get_vod_categories",
                          headers=HEADERS, timeout=5, verify=False)
         if r.status_code == 200:
-            j = r.json()
-            if isinstance(j, list) and len(j) > 0:
-                modules["vod"] = True
+            # فحص وجود عناصر بدون تحميل كامل
+            for prefix, event, value in ijson.parse(r.raw):
+                if event == 'start_array' and prefix == '':
+                    modules["vod"] = True
+                    break
+        r.close()
     except Exception:
         pass
     try:
@@ -755,9 +768,11 @@ def _detect_xtream_modules(session, api_url, first_stream_id=None, job_id=None):
         r = safe_request(session, f"{api_url}&action=get_series_categories",
                          headers=HEADERS, timeout=5, verify=False)
         if r.status_code == 200:
-            j = r.json()
-            if isinstance(j, list) and len(j) > 0:
-                modules["series"] = True
+            for prefix, event, value in ijson.parse(r.raw):
+                if event == 'start_array' and prefix == '':
+                    modules["series"] = True
+                    break
+        r.close()
     except Exception:
         pass
     if first_stream_id:
@@ -771,38 +786,51 @@ def _detect_xtream_modules(session, api_url, first_stream_id=None, job_id=None):
                 epg_list = j.get("epg_listings") if isinstance(j, dict) else None
                 if isinstance(epg_list, list) and len(epg_list) > 0:
                     modules["epg"] = True
+            r.close()
         except Exception:
             pass
     return modules
 
 def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_ch_id=None, job_id=None):
     modules = {"live": True, "vod": False, "series": False, "epg": False}
+    # VOD categories
     try:
         if job_id and is_cancelled(job_id):
             raise CancelException("Cancelled")
         r = safe_request(session, f"{portal_url}{api_path}",
                          params={"type": "vod", "action": "get_categories",
                                  "JsHttpRequest": "1-xml"},
-                         headers=headers, cookies=cookies, timeout=5, verify=False)
+                         headers=headers, cookies=cookies, timeout=5, verify=False,
+                         stream=True)
         if r.status_code == 200:
-            js = (r.json() or {}).get("js", None)
-            if isinstance(js, list) and len(js) > 0:
-                modules["vod"] = True
+            r.raw.decode_content = True
+            # قراءة أول عنصر فقط لمعرفة وجود بيانات
+            for prefix, event, value in ijson.parse(r.raw):
+                if event == 'start_array' and prefix == 'js':
+                    modules["vod"] = True
+                    break
+        r.close()
     except Exception:
         pass
+    # Series categories
     try:
         if job_id and is_cancelled(job_id):
             raise CancelException("Cancelled")
         r = safe_request(session, f"{portal_url}{api_path}",
                          params={"type": "series", "action": "get_categories",
                                  "JsHttpRequest": "1-xml"},
-                         headers=headers, cookies=cookies, timeout=5, verify=False)
+                         headers=headers, cookies=cookies, timeout=5, verify=False,
+                         stream=True)
         if r.status_code == 200:
-            js = (r.json() or {}).get("js", None)
-            if isinstance(js, list) and len(js) > 0:
-                modules["series"] = True
+            r.raw.decode_content = True
+            for prefix, event, value in ijson.parse(r.raw):
+                if event == 'start_array' and prefix == 'js':
+                    modules["series"] = True
+                    break
+        r.close()
     except Exception:
         pass
+    # EPG (does not need full)
     if first_ch_id:
         try:
             if job_id and is_cancelled(job_id):
@@ -813,9 +841,11 @@ def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_c
                                      "JsHttpRequest": "1-xml"},
                              headers=headers, cookies=cookies, timeout=5, verify=False)
             if r.status_code == 200:
+                # EPG info قد تكون صغيرة، يمكن استخدام r.json()
                 js = (r.json() or {}).get("js", None)
                 if js:
                     modules["epg"] = True
+            r.close()
         except Exception:
             pass
     return modules
@@ -959,6 +989,7 @@ def _measure_bandwidth(url, cache_key, headers=None, cookies=None):
         r = safe_request(sess, url, headers=h, cookies=cookies,
                          timeout=timeout_s, verify=False, stream=True)
         if r.status_code >= 400:
+            r.close()
             raise Exception("bad status")
         for chunk in r.iter_content(64 * 1024):
             if not chunk:
@@ -968,11 +999,20 @@ def _measure_bandwidth(url, cache_key, headers=None, cookies=None):
             if total_bytes >= max_bytes or elapsed >= timeout_s:
                 break
         r.close()
+        sess.close()
         elapsed = max(time.perf_counter() - start, 0.001)
         if total_bytes > 0:
             kbps = round((total_bytes * 8 / 1000.0) / elapsed, 1)
     except Exception:
         kbps = 0.0
+    finally:
+        try:
+            if 'r' in locals():
+                r.close()
+            if 'sess' in locals():
+                sess.close()
+        except Exception:
+            pass
 
     with _BW_LOCK:
         _BW_CACHE[cache_key] = {"kbps": kbps, "ts": time.time()}
@@ -986,8 +1026,10 @@ def _get_mac_bandwidth_url(session, portal_url, api_path, headers, cookies, cmds
             r = safe_request(session, f"{portal_url}{api_path}", params=params,
                              headers=headers, cookies=cookies, timeout=5, verify=False)
             if r.status_code != 200:
+                r.close()
                 continue
             js = (r.json() or {}).get("js", "") or {}
+            r.close()
             raw_url = None
             if isinstance(js, dict):
                 raw_url = js.get("url") or js.get("cmd")
@@ -1099,8 +1141,18 @@ def _geoip_lookup(hostname):
                     "isp": j.get("isp"),
                     "org": j.get("org"),
                 }
+        r.close()
+        sess.close()
     except Exception:
         result = None
+    finally:
+        try:
+            if 'r' in locals():
+                r.close()
+            if 'sess' in locals():
+                sess.close()
+        except Exception:
+            pass
     with _GEO_LOCK:
         _GEO_CACHE[hostname] = result if result is not None else "NULL"
     return result
@@ -1176,6 +1228,7 @@ def _analyze_m3u(url):
                     break
             else:
                 partial = False
+        sess.close()
         lines = buf.split("\n")
         extinf_lines = [l for l in lines if l.strip().upper().startswith("#EXTINF")]
         total_channels = len(extinf_lines)
@@ -1208,6 +1261,12 @@ def _analyze_m3u(url):
         }
     except Exception:
         return None
+    finally:
+        try:
+            if 'sess' in locals():
+                sess.close()
+        except Exception:
+            pass
 
 def _rescue_try_getphp_m3u(session, base_url, username, password):
     try:
@@ -1286,9 +1345,11 @@ def _bridge_auth(portal_url, mac_address, force=False):
             if r.status_code in (200, 401, 403):
                 hs_resp, api_path = r, path
                 break
+            r.close()
         except Exception:
             continue
     if hs_resp is None:
+        session.close()
         return None
     token = ""
     try:
@@ -1297,7 +1358,9 @@ def _bridge_auth(portal_url, mac_address, force=False):
             token = (j.get("js") or {}).get("token", "") or j.get("token", "")
     except Exception:
         pass
+    hs_resp.close()
     if not token:
+        session.close()
         return None
     entry = {"session": session, "headers": mac_headers, "cookies": cookies,
              "api_path": api_path, "token": token, "ts": now}
@@ -1320,19 +1383,24 @@ def _bridge_api(portal_url, mac_address, params, auth=None):
     if r.status_code in (401, 403):
         auth = _bridge_auth(portal_url, mac_address, force=True)
         if not auth:
+            r.close()
             return None, None
         headers["Authorization"] = f"Bearer {auth['token']}"
         try:
             r = safe_request(auth["session"], url, params=params, headers=headers,
                              cookies=auth["cookies"], timeout=8, verify=False)
         except Exception:
+            r.close()
             return None, auth
     if r.status_code != 200:
+        r.close()
         return None, auth
     try:
-        return (r.json() or {}).get("js", {}), auth
+        data = (r.json() or {}).get("js", {})
     except Exception:
-        return None, auth
+        data = {}
+    r.close()
+    return data, auth
 
 def _bridge_channels(portal_url, mac_address):
     key = (normalize_portal_url(portal_url), mac_address)
@@ -1478,6 +1546,7 @@ def clear_cancel(job_id):
 # ══════════════════════════════════════════════════════════════
 
 def test_single_server(server_url, username, password, m3u_analysis_enabled=False, job_id=None):
+    session = None
     try:
         if job_id and is_cancelled(job_id):
             raise CancelException("Cancelled")
@@ -1836,8 +1905,13 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
             "max_connections": "1", "active_connections": "0",
             "m3u_url": "", "stream_ok": None, "api_path": ""
         })
+    finally:
+        if session:
+            session.close()
+        gc.collect()
 
 def test_mac_portal(portal_url, mac_address, job_id=None):
+    session = None
     try:
         if job_id and is_cancelled(job_id):
             raise CancelException("Cancelled")
@@ -1917,10 +1991,12 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                         if r.status_code >= 500:
                             consec += 1
                             time.sleep(0.3)
+                            r.close()
                             continue
                         consec = 0
                         if r.status_code in (200, 401, 403):
                             return r, path, last
+                        r.close()
                     except CancelException:
                         raise
                     except Exception:
@@ -1962,6 +2038,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                                  or j.get("token", ""))
                 except Exception:
                     pass
+                hs_resp.close()
                 if not token:
                     res["error"] = "No Token (MAC rejected)"
                     res["failure_reason"] = "NO_TOKEN"
@@ -2025,12 +2102,16 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                             res["error"] = "STB Blocked (provider)"
                             res["failure_reason"] = "STB_BLOCKED"
                             res["auth_valid"] = False
+                            pr.close()
                             return sanitize_result(res)
                         new_tok = prof.get("token", "")
                         if new_tok:
                             auth_headers["Authorization"] = f"Bearer {new_tok}"
                     except Exception:
                         pass
+                    finally:
+                        if pr:
+                            pr.close()
                 if not profile_ok:
                     res["error"] = "MAC Blocked / Expired"
                     res["failure_reason"] = "MAC_BLOCKED"
@@ -2062,6 +2143,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     diag.append(f"acc:{ar.status_code}")
                     if ar.status_code == 200:
                         acc = (ar.json() or {}).get("js", {}) or {}
+                    ar.close()
                 except CancelException:
                     raise
                 except Exception:
@@ -2088,6 +2170,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                                 first = sj["subscriptions"][0]
                                 if isinstance(first, dict):
                                     sub.update(first)
+                    sr.close()
                 except CancelException:
                     raise
                 except Exception:
@@ -2105,6 +2188,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     diag.append(f"main:{mr.status_code}")
                     if mr.status_code == 200:
                         main = (mr.json() or {}).get("js", {}) or {}
+                    mr.close()
                 except CancelException:
                     raise
                 except Exception:
@@ -2173,9 +2257,11 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                         if rr.status_code == 200:
                             diag.append(f"{tag}:{rr.status_code}")
                             jj = (rr.json() or {}).get("js", {}) or {}
+                            rr.close()
                             return jj
                         else:
                             diag.append(f"{tag}:{rr.status_code}")
+                            rr.close()
                             return {}
                     except CancelException:
                         raise
@@ -2471,6 +2557,10 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
             "rescued": False,
             "rescue_method": ""
         })
+    finally:
+        if session:
+            session.close()
+        gc.collect()
 
 # ══════════════════════════════════════════════════════════════
 #  JSON Safe Serializer
@@ -2567,7 +2657,7 @@ def check_servers():
 
             max_workers = 20
             if scan_type == "mac":
-                max_workers = 5
+                max_workers = 3
 
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 fmap = {}
