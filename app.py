@@ -1,11 +1,6 @@
 # ══════════════════════════════════════════════════════════════
-#  IPTV Pro Inspector — v5.9.2-patched (PWA + Stability + Streaming JSON)
-#  (جميع الإصلاحات + دعم عدد الاتصالات + إصلاح ffmpeg + تمييز الرفض
-#   + محاولات إضافية لاستخراج تاريخ الانتهاء وعدد الأجهزة
-#   + دعم PWA كامل + تحسينات الذاكرة والاستقرار
-#   + استخدام ijson للقراءة التدفقية للاستجابات الضخمة
-#   + إصلاح توزيع العينة في get_all_channels
-#   + إغلاق الجلسات والاستجابات + تقليل عمال MAC إلى 3)
+#  IPTV Pro Inspector — Diagnostic Memory Version
+#  (جميع الإصلاحات السابقة + قياس استهلاك الذاكرة)
 # ══════════════════════════════════════════════════════════════
 from flask import Flask, render_template, request, jsonify, redirect, Response, stream_with_context
 import time, requests, urllib3, threading, re, json, random, uuid, socket, ssl, ipaddress, os
@@ -15,6 +10,7 @@ import struct
 import zlib
 import gc
 import ijson
+import resource
 from datetime import datetime, timezone
 from urllib.parse import urlparse, quote, urlunparse, urljoin, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -23,6 +19,18 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 app = Flask(__name__)
+
+# ══════════════════════════════════════════════════════════════
+#  أدوات قياس الذاكرة
+# ══════════════════════════════════════════════════════════════
+def _get_memory_mb():
+    try:
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    except Exception:
+        return 0.0
+
+def _log_memory(tag=""):
+    print(f"[MEM] {tag} {_get_memory_mb():.2f}MB", flush=True)
 
 # ══════════════════════════════════════════════════════════════
 #  دالة توليد PNG بسيطة (لأيقونات PWA)
@@ -754,7 +762,6 @@ def _detect_xtream_modules(session, api_url, first_stream_id=None, job_id=None):
         r = safe_request(session, f"{api_url}&action=get_vod_categories",
                          headers=HEADERS, timeout=5, verify=False)
         if r.status_code == 200:
-            # فحص وجود عناصر بدون تحميل كامل
             for prefix, event, value in ijson.parse(r.raw):
                 if event == 'start_array' and prefix == '':
                     modules["vod"] = True
@@ -793,7 +800,6 @@ def _detect_xtream_modules(session, api_url, first_stream_id=None, job_id=None):
 
 def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_ch_id=None, job_id=None):
     modules = {"live": True, "vod": False, "series": False, "epg": False}
-    # VOD categories
     try:
         if job_id and is_cancelled(job_id):
             raise CancelException("Cancelled")
@@ -804,7 +810,6 @@ def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_c
                          stream=True)
         if r.status_code == 200:
             r.raw.decode_content = True
-            # قراءة أول عنصر فقط لمعرفة وجود بيانات
             for prefix, event, value in ijson.parse(r.raw):
                 if event == 'start_array' and prefix == 'js':
                     modules["vod"] = True
@@ -812,7 +817,6 @@ def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_c
         r.close()
     except Exception:
         pass
-    # Series categories
     try:
         if job_id and is_cancelled(job_id):
             raise CancelException("Cancelled")
@@ -830,7 +834,6 @@ def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_c
         r.close()
     except Exception:
         pass
-    # EPG (does not need full)
     if first_ch_id:
         try:
             if job_id and is_cancelled(job_id):
@@ -841,7 +844,6 @@ def _detect_mac_modules(session, portal_url, api_path, headers, cookies, first_c
                                      "JsHttpRequest": "1-xml"},
                              headers=headers, cookies=cookies, timeout=5, verify=False)
             if r.status_code == 200:
-                # EPG info قد تكون صغيرة، يمكن استخدام r.json()
                 js = (r.json() or {}).get("js", None)
                 if js:
                     modules["epg"] = True
@@ -979,6 +981,8 @@ def _measure_bandwidth(url, cache_key, headers=None, cookies=None):
         return cached["kbps"]
 
     kbps = 0.0
+    sess = None
+    r = None
     try:
         sess = _make_retry_session()
         h = headers or {"User-Agent": "VLC/3.0.9"}
@@ -989,7 +993,6 @@ def _measure_bandwidth(url, cache_key, headers=None, cookies=None):
         r = safe_request(sess, url, headers=h, cookies=cookies,
                          timeout=timeout_s, verify=False, stream=True)
         if r.status_code >= 400:
-            r.close()
             raise Exception("bad status")
         for chunk in r.iter_content(64 * 1024):
             if not chunk:
@@ -998,21 +1001,16 @@ def _measure_bandwidth(url, cache_key, headers=None, cookies=None):
             elapsed = time.perf_counter() - start
             if total_bytes >= max_bytes or elapsed >= timeout_s:
                 break
-        r.close()
-        sess.close()
         elapsed = max(time.perf_counter() - start, 0.001)
         if total_bytes > 0:
             kbps = round((total_bytes * 8 / 1000.0) / elapsed, 1)
     except Exception:
         kbps = 0.0
     finally:
-        try:
-            if 'r' in locals():
-                r.close()
-            if 'sess' in locals():
-                sess.close()
-        except Exception:
-            pass
+        if r:
+            r.close()
+        if sess:
+            sess.close()
 
     with _BW_LOCK:
         _BW_CACHE[cache_key] = {"kbps": kbps, "ts": time.time()}
@@ -1125,6 +1123,8 @@ def _geoip_lookup(hostname):
             _GEO_CACHE[hostname] = "RATE_LIMITED"
         return None
     result = None
+    sess = None
+    r = None
     try:
         sess = _make_retry_session()
         r = safe_request(sess,
@@ -1141,18 +1141,13 @@ def _geoip_lookup(hostname):
                     "isp": j.get("isp"),
                     "org": j.get("org"),
                 }
-        r.close()
-        sess.close()
     except Exception:
         result = None
     finally:
-        try:
-            if 'r' in locals():
-                r.close()
-            if 'sess' in locals():
-                sess.close()
-        except Exception:
-            pass
+        if r:
+            r.close()
+        if sess:
+            sess.close()
     with _GEO_LOCK:
         _GEO_CACHE[hostname] = result if result is not None else "NULL"
     return result
@@ -1199,6 +1194,7 @@ def _ssl_check(hostname, port=443):
     return data
 
 def _analyze_m3u(url):
+    sess = None
     try:
         sess = _make_retry_session()
         max_bytes = 2 * 1024 * 1024
@@ -1228,7 +1224,6 @@ def _analyze_m3u(url):
                     break
             else:
                 partial = False
-        sess.close()
         lines = buf.split("\n")
         extinf_lines = [l for l in lines if l.strip().upper().startswith("#EXTINF")]
         total_channels = len(extinf_lines)
@@ -1262,11 +1257,8 @@ def _analyze_m3u(url):
     except Exception:
         return None
     finally:
-        try:
-            if 'sess' in locals():
-                sess.close()
-        except Exception:
-            pass
+        if sess:
+            sess.close()
 
 def _rescue_try_getphp_m3u(session, base_url, username, password):
     try:
@@ -1913,6 +1905,7 @@ def test_single_server(server_url, username, password, m3u_analysis_enabled=Fals
 def test_mac_portal(portal_url, mac_address, job_id=None):
     session = None
     try:
+        _log_memory("mac-start")
         if job_id and is_cancelled(job_id):
             raise CancelException("Cancelled")
 
@@ -1947,7 +1940,9 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
             except Exception as dns_exc:
                 res["error"] = f"DNS Timeout: {str(dns_exc)[:30]}"
                 res["failure_reason"] = "DNS_TIMEOUT"
+                _log_memory("mac-dns-error")
                 return sanitize_result(res)
+        _log_memory("after-dns")
 
         chosen_ua = random.choice(MAG_UA_POOL)
         mac_headers = {
@@ -2025,10 +2020,12 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 if hs_resp is None:
                     res["error"] = f"HTTP {last_status}" if last_status else "Portal unreachable"
                     res["failure_reason"] = "PORTAL_UNREACHABLE"
+                    _log_memory("mac-handshake-fail")
                     return sanitize_result(res)
 
                 res["is_online"] = True
                 res["api_path"] = api_path
+                _log_memory("after-handshake")
 
                 token = ""
                 try:
@@ -2042,6 +2039,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 if not token:
                     res["error"] = "No Token (MAC rejected)"
                     res["failure_reason"] = "NO_TOKEN"
+                    _log_memory("mac-no-token")
                     return sanitize_result(res)
 
                 auth_headers = dict(mac_headers)
@@ -2103,6 +2101,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                             res["failure_reason"] = "STB_BLOCKED"
                             res["auth_valid"] = False
                             pr.close()
+                            _log_memory("mac-blocked")
                             return sanitize_result(res)
                         new_tok = prof.get("token", "")
                         if new_tok:
@@ -2115,12 +2114,14 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                 if not profile_ok:
                     res["error"] = "MAC Blocked / Expired"
                     res["failure_reason"] = "MAC_BLOCKED"
+                    _log_memory("mac-profile-fail")
                     return sanitize_result(res)
 
                 res["auth_valid"] = True
                 res["status"] = "Active MAC"
                 res["modules"]["live"] = True
                 diag = []
+                _log_memory("after-profile")
 
                 date_keys = [
                     "expire_date", "exp_date", "expiration_date", "expires",
@@ -2193,12 +2194,14 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
                     raise
                 except Exception:
                     diag.append("main:ERR")
+                _log_memory("after-account-info")
 
                 if _looks_blocked({"p": prof, "a": acc, "s": sub, "m": main}):
                     res["status"] = "Blocked"
                     res["error"] = "STB Blocked (provider)"
                     res["failure_reason"] = "STB_BLOCKED"
                     res["auth_valid"] = False
+                    _log_memory("mac-blocked2")
                     return sanitize_result(res)
 
                 conn_keys_max = ["max_connections", "max_cons", "max_users",
@@ -2348,7 +2351,10 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
         except _LockBusy:
             res["error"] = "Portal busy (semaphore timeout)"
             res["failure_reason"] = "PORTAL_BUSY"
+            _log_memory("mac-busy")
             return sanitize_result(res)
+
+        _log_memory("after-semaphore")
 
         first_ch_id = None
         cmds = []
@@ -2418,6 +2424,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
             raise
         except Exception:
             pass
+        _log_memory("after-get_all_channels")
 
         try:
             if job_id and is_cancelled(job_id):
@@ -2430,6 +2437,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
             raise
         except Exception:
             pass
+        _log_memory("after-detect-modules")
 
         try:
             if res["modules"].get("vod"):
@@ -2449,6 +2457,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
             raise
         except Exception:
             res["series_count"] = 0
+        _log_memory("after-vod-series")
 
         if res["auth_valid"]:
             host, port, scheme = None, None, None
@@ -2490,9 +2499,11 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
             except Exception:
                 res["score"] = 0
 
+        _log_memory("mac-end")
         return sanitize_result(res)
 
     except CancelException:
+        _log_memory("mac-cancelled")
         return sanitize_result({
             "server": portal_url,
             "username": f"MAC: {mac_address}",
@@ -2525,6 +2536,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
         })
 
     except Exception as outer_exc:
+        _log_memory("mac-crash")
         return sanitize_result({
             "server": portal_url,
             "username": f"MAC: {mac_address}",
@@ -2560,6 +2572,7 @@ def test_mac_portal(portal_url, mac_address, job_id=None):
     finally:
         if session:
             session.close()
+        _log_memory("mac-finally")
         gc.collect()
 
 # ══════════════════════════════════════════════════════════════
@@ -2676,6 +2689,7 @@ def check_servers():
                             if job_id in _JOBS:
                                 _JOBS[job_id]["done"] += 1
                         q.put(result)
+                        _log_memory(f"worker-after-result-{scan_type}")
                         gc.collect()
                     except Exception as e:
                         q.put({
